@@ -10,7 +10,9 @@ const vec3 SUN_COLOR = vec3(1.0, 0.94, 0.86);
 const float SUN_STRENGTH = 3.2;            // irradiance / PI folded into one factor
 const float SKY_AMBIENT = 0.55;            // sky radiance scale for indirect light (sun:sky balance)
 const float SUN_DISK_RADIANCE = 40.0;
-const float EMISSION_STRENGTH = 4.0;       // radiance of a light level 15 block, relative to albedo
+const float EMISSION_STRENGTH = 5.0;       // radiance of a light level 15 block, relative to albedo
+const vec3 BLOCK_LIGHT_COLOR = vec3(1.0, 0.76, 0.5);
+const float BLOCK_LIGHT_STRENGTH = 2.2;    // irradiance at block light level 15 (torch-lit surfaces)
 const float MAX_DISTANCE = 4096.0;
 const float RAY_EPSILON = 1.0e-3;
 
@@ -23,9 +25,10 @@ const uint MASK_ALL = 0xFFu;
 const uint FLAG_RESET = 1u;
 const uint FLAG_CAMERA_UNDERWATER = 2u;
 
-// Water optics (per block travelled)
-const vec3 WATER_ABSORPTION = vec3(0.32, 0.075, 0.055);
-const vec3 WATER_SCATTER = vec3(0.035, 0.11, 0.14);
+// Water optics (per block travelled). Scattering is scaled by the water surface colour.
+const vec3 WATER_ABSORPTION = vec3(0.45, 0.12, 0.09);
+const float WATER_SCATTER_ALBEDO = 0.12;
+const vec3 DEFAULT_WATER_ALBEDO = vec3(0.12, 0.24, 0.45);
 
 layout(set = 0, binding = 1, std140) uniform FrameUBO {
     mat4 invViewProj;   // unjittered, camera-anchor relative
@@ -115,4 +118,11 @@ vec3 skyRadiance(vec3 dir, bool includeSunDisk) {
 
 vec3 emissionOf(uint material) {
     return vec3(float(material & MAT_EMISSION_MASK) * (EMISSION_STRENGTH / 15.0));
+}
+
+// Light from nearby light sources, from Minecraft's own light propagation (stored per quad).
+// Complements ray traced emission, which alone is too noisy/dim for small lights like torches.
+vec3 blockLightOf(uint material) {
+    float level = float((material >> MAT_BLOCK_LIGHT_SHIFT) & 0xFu) / 15.0;
+    return BLOCK_LIGHT_COLOR * (BLOCK_LIGHT_STRENGTH * pow(level, 2.6));
 }

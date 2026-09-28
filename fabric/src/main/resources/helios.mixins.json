@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_21",
   "client": [
     "LevelRendererMixin",
-    "DebugScreenOverlayMixin"
+    "DebugScreenOverlayMixin",
+    "EntityRenderDispatcherMixin"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -2,6 +2,18 @@
 
 Jars built by CI are named `helios-<version>+<commit>.jar`.
 
+## 0.3.0
+- Entity shadows use the real animated models (mobs, your own player, items, minecarts) instead
+  of boxes; vanilla's round blob shadows are hidden while Helios renders.
+- Vanilla sky is kept (square sun and moon, stars, sunsets, clouds); the ray traced world is drawn
+  over it.
+- Liquids are meshed by Minecraft's own liquid renderer: sloped flowing water/lava and waterfalls
+  look right.
+- Water no longer looks like aerogel: far less scattering, coloured by the water texture and biome
+  colour, and sunlight on submerged surfaces is dimmed by the water above.
+- Torches and other lights are much brighter: surfaces also use Minecraft's block light level,
+  on top of ray traced emission.
+
 ## 0.2.0
 Image quality
 - Sun/moon shadows are no longer blurred by the denoiser: direct light is kept sharp and only the

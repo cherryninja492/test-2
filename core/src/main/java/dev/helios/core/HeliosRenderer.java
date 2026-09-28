@@ -202,9 +202,12 @@ public final class HeliosRenderer implements AutoCloseable {
         return scene.sectionCount();
     }
 
-    /** Entity boxes (world-space AABBs, 6 doubles each) that cast shadows this frame. */
-    public void setShadowCasters(double[] aabbs, int count) {
-        scene.setShadowCasters(aabbs, count);
+    /**
+     * Shadow-only geometry for this frame (entity models): quads of 4 xyz vertices, relative to a
+     * world-space origin (usually the camera).
+     */
+    public void setShadowGeometry(float[] vertices, int quadCount, double originX, double originY, double originZ) {
+        scene.setShadowGeometry(vertices, quadCount, originX, originY, originZ);
     }
 
     /**

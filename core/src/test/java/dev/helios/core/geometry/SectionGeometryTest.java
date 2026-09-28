@@ -52,6 +52,18 @@ class SectionGeometryTest {
     }
 
     @Test
+    void blockLightIsPackedIndependently() {
+        int m = Materials.pack(3, 14, true, false);
+        assertEquals(3, Materials.emission(m));
+        assertEquals(14, Materials.blockLight(m));
+        assertTrue(Materials.isCutout(m));
+        int relit = Materials.withBlockLight(m, 5);
+        assertEquals(5, Materials.blockLight(relit));
+        assertEquals(3, Materials.emission(relit));
+        assertTrue(Materials.isCutout(relit));
+    }
+
+    @Test
     void materialPackingClampsEmission() {
         assertEquals(15, Materials.emission(Materials.pack(99, false, false)));
         assertTrue(Materials.isWater(Materials.pack(0, false, true)));

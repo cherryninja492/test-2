@@ -69,7 +69,7 @@ vec3 traceIndirect(vec3 pos, vec3 n, inout uint rng) {
         n = hit.normal;
         throughput *= hit.albedo;
         if ((hit.material & MAT_WATER) != 0u) break; // treat water as a dark diffuse surface for GI
-        radiance += throughput * (emissionOf(hit.material) + directLight(pos, n, rng));
+        radiance += throughput * (emissionOf(hit.material) + blockLightOf(hit.material) + directLight(pos, n, rng));
         if (b >= 1u) {
             float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
             if (rand(rng) > survive) break;
@@ -81,22 +81,23 @@ vec3 traceIndirect(vec3 pos, vec3 n, inout uint rng) {
 
 // Single-bounce mirror reflection of the scene (water surfaces).
 vec3 traceReflection(vec3 origin, vec3 dir, inout uint rng) {
-    if (!traceSurface(origin, dir)) return skyRadiance(dir, true);
+    if (!traceSurface(origin, dir)) return skyRadiance(dir, false);
     vec3 pos = origin + dir * hit.t;
     vec3 albedo = hit.albedo;
     vec3 n = hit.normal;
     uint material = hit.material;
-    return albedo * (emissionOf(material) + directLight(pos, n, rng) + ambientSky(n));
+    return albedo * (emissionOf(material) + blockLightOf(material) + directLight(pos, n, rng) + ambientSky(n));
 }
 
 vec3 waterTransmittance(float distance) {
     return exp(-WATER_ABSORPTION * distance);
 }
 
-// Light scattered towards the camera inside a water segment (single-scattering approximation).
-vec3 waterInscatter(vec3 segmentTransmittance) {
-    vec3 light = SUN_COLOR * lightIntensity() * 0.6 + skyRadiance(vec3(0.0, 1.0, 0.0), false) * 0.5;
-    return WATER_SCATTER * light * (1.0 - segmentTransmittance) / WATER_ABSORPTION;
+// Light scattered towards the camera inside a water segment: the water's own colour, fading in
+// with distance (single-scattering approximation).
+vec3 waterInscatter(vec3 segmentTransmittance, vec3 waterAlbedo) {
+    vec3 light = SUN_COLOR * (lightIntensity() * SUN_STRENGTH * 0.5) + skyRadiance(vec3(0.0, 1.0, 0.0), false) * SKY_AMBIENT;
+    return waterAlbedo * WATER_SCATTER_ALBEDO * light * (1.0 - segmentTransmittance);
 }
 
 vec2 motionFromClip(vec4 prevClip, vec2 currentUv) {
@@ -128,13 +129,16 @@ void main() {
     vec3 origin = frame.cameraPos.xyz;
     vec3 transmittance = vec3(1.0);
     vec3 specular = vec3(0.0);
+    vec3 waterAlbedo = DEFAULT_WATER_ALBEDO;
     float glDepth = -1.0;
     bool solid = false;
+    bool throughWater = inWater;
     for (int i = 0; i < 3; i++) {
         bool found = traceSurface(origin, dir);
+        if (found && (hit.material & MAT_WATER) != 0u) waterAlbedo = hit.albedo;
         if (inWater) {
             vec3 segment = waterTransmittance(found ? hit.t : 64.0);
-            specular += transmittance * waterInscatter(segment);
+            specular += transmittance * waterInscatter(segment, waterAlbedo);
             transmittance *= segment;
         }
         if (!found) break;
@@ -152,6 +156,7 @@ void main() {
             transmittance *= 1.0 - f;
         }
         inWater = !inWater;
+        throughWater = true;
         origin = p - n * RAY_EPSILON; // continue on the other side of the surface
     }
 
@@ -184,7 +189,9 @@ void main() {
         direct += directLight(pos, n, rng);
         indirect += traceIndirect(pos, n, rng);
     }
-    direct = direct / float(spp) + emissionOf(material); // emission = albedo * k, demodulated to k
+    direct = direct / float(spp) + emissionOf(material) + blockLightOf(material); // emission = albedo * k -> k
+    // Light reaching a submerged surface crossed the water too (approximated by the view path).
+    if (throughWater) transmittance *= transmittance;
     indirect = min(indirect / float(spp), vec3(FIREFLY_CLAMP));
 
     imageStore(outIndirect, pixel, vec4(indirect, 1.0));

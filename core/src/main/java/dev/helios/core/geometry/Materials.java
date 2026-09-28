@@ -7,6 +7,7 @@ package dev.helios.core.geometry;
  *  bits 0-3  block light emission (0-15)
  *  bit  4    cutout: alpha tested in the any-hit shader
  *  bit  5    water: specular reflections with Fresnel; transparent to shadow rays
+ *  bits 8-11 Minecraft block light level (0-15) in front of the face
  * </pre>
  *
  * Water is routed through the any-hit shader like cutout geometry, so shadow rays can skip it.
@@ -15,15 +16,33 @@ public final class Materials {
     public static final int EMISSION_MASK = 0xF;
     public static final int CUTOUT = 1 << 4;
     public static final int WATER = 1 << 5;
+    public static final int BLOCK_LIGHT_SHIFT = 8;
 
     private Materials() {
     }
 
     public static int pack(int emission, boolean cutout, boolean water) {
-        int m = Math.max(0, Math.min(15, emission));
+        return pack(emission, 0, cutout, water);
+    }
+
+    public static int pack(int emission, int blockLight, boolean cutout, boolean water) {
+        int m = clamp(emission) | clamp(blockLight) << BLOCK_LIGHT_SHIFT;
         if (cutout) m |= CUTOUT;
         if (water) m |= WATER;
         return m;
+    }
+
+    /** Same material with a different block light level. */
+    public static int withBlockLight(int material, int blockLight) {
+        return (material & ~(0xF << BLOCK_LIGHT_SHIFT)) | clamp(blockLight) << BLOCK_LIGHT_SHIFT;
+    }
+
+    public static int blockLight(int material) {
+        return (material >> BLOCK_LIGHT_SHIFT) & 0xF;
+    }
+
+    private static int clamp(int level) {
+        return Math.max(0, Math.min(15, level));
     }
 
     public static int emission(int material) {

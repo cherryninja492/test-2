@@ -23,8 +23,8 @@ import static org.lwjgl.vulkan.VK10.*;
 
 /**
  * Acceleration structures for the loaded world: one BLAS per non-empty chunk section (built once
- * when the section's mesh changes), one BLAS of entity boxes rebuilt every frame (shadow casters
- * only), and a TLAS rebuilt every frame from all of them, translated relative to the camera anchor.
+ * when the section's mesh changes), one BLAS of entity model quads rebuilt every frame (shadow
+ * casters only), and a TLAS rebuilt every frame from all of them, translated relative to the camera anchor.
  *
  * <p>Lifetime: one frame may be in flight on the GPU while the game calls {@link #upload} and
  * {@link #remove}. Replaced and removed resources are therefore retired and destroyed in the next
@@ -35,11 +35,9 @@ public final class SceneAccel implements AutoCloseable {
     public static final int GEOMETRY_ENTRY_SIZE = 16;
     public static final int MASK_WORLD = 0x01;
     public static final int MASK_SHADOW_CASTER = 0x02;
-    public static final int MAX_SHADOW_BOXES = 512;
+    public static final int MAX_SHADOW_QUADS = 32768;
 
     private static final int INSTANCE_SIZE = VkAccelerationStructureInstanceKHR.SIZEOF;
-    private static final int BOX_VERTICES = 8;
-    private static final int BOX_INDICES = 36;
 
     private static final class Section {
         final int sx, sy, sz;
@@ -78,23 +76,21 @@ public final class SceneAccel implements AutoCloseable {
     private int tlasCapacity;
     private int instanceCount;
 
-    // Entity shadow casters: world-space AABBs (minX, minY, minZ, maxX, maxY, maxZ).
-    private final double[] boxes = new double[MAX_SHADOW_BOXES * 6];
-    private int boxCount;
-    private final GpuBuffer boxVertices;
-    private final GpuBuffer boxIndices;
-    private GpuBuffer boxBlasBuffer;
-    private long boxBlas = VK_NULL_HANDLE;
-    private long boxBlasAddress;
+    // Entity shadow casters: quads (4 xyz vertices each) relative to an origin, rebuilt every frame.
+    private final float[] shadowVertices = new float[MAX_SHADOW_QUADS * 12];
+    private int shadowQuads;
+    private double shadowOriginX, shadowOriginY, shadowOriginZ;
+    private final GpuBuffer shadowVertexBuffer;
+    private GpuBuffer shadowBlasBuffer;
+    private long shadowBlas = VK_NULL_HANDLE;
+    private long shadowBlasAddress;
 
     public SceneAccel(VulkanContext ctx) {
         this.ctx = ctx;
         ensureInstanceCapacity(1024);
-        ensureIndexCapacity(4096);
-        int inputUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-        boxVertices = GpuBuffer.hostVisible(ctx, (long) MAX_SHADOW_BOXES * BOX_VERTICES * 12, inputUsage);
-        boxIndices = GpuBuffer.hostVisible(ctx, (long) MAX_SHADOW_BOXES * BOX_INDICES * 4, inputUsage);
-        writeBoxIndices();
+        ensureIndexCapacity(MAX_SHADOW_QUADS);
+        shadowVertexBuffer = GpuBuffer.hostVisible(ctx, (long) MAX_SHADOW_QUADS * 4 * 12,
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
     }
 
     public static long key(int sx, int sy, int sz) {
@@ -137,10 +133,16 @@ public final class SceneAccel implements AutoCloseable {
         pending.clear();
     }
 
-    /** Sets this frame's entity shadow casters (world-space AABBs, 6 doubles each). */
-    public void setShadowCasters(double[] aabbs, int count) {
-        boxCount = Math.min(count, MAX_SHADOW_BOXES);
-        System.arraycopy(aabbs, 0, boxes, 0, boxCount * 6);
+    /**
+     * Sets this frame's shadow-only geometry (entity models): {@code quadCount} quads of 4 xyz
+     * vertices each, relative to the world-space origin.
+     */
+    public void setShadowGeometry(float[] vertices, int quadCount, double originX, double originY, double originZ) {
+        shadowQuads = Math.min(quadCount, MAX_SHADOW_QUADS);
+        System.arraycopy(vertices, 0, shadowVertices, 0, shadowQuads * 12);
+        shadowOriginX = originX;
+        shadowOriginY = originY;
+        shadowOriginZ = originZ;
     }
 
     public long tlas() {
@@ -152,7 +154,7 @@ public final class SceneAccel implements AutoCloseable {
     }
 
     /**
-     * Records vertex uploads, BLAS builds for changed sections and entity boxes, and a full TLAS
+     * Records vertex uploads, BLAS builds for changed sections and shadow casters, and a full TLAS
      * build, ending with a barrier. May recreate the TLAS/geometry table: callers must re-bind both
      * descriptors every frame. The previous frame must have completed on the GPU.
      */
@@ -187,8 +189,8 @@ public final class SceneAccel implements AutoCloseable {
                 scratchOffsets[i] = scratchTotal;
                 scratchTotal += align(sizes.buildScratchSize(), scratchAlign);
             }
-            long boxScratchOffset = scratchTotal;
-            if (boxCount > 0) scratchTotal += align(prepareBoxBlas(stack, sizes), scratchAlign);
+            long shadowScratchOffset = scratchTotal;
+            if (shadowQuads > 0) scratchTotal += align(prepareShadowBlas(stack, sizes), scratchAlign);
             long tlasScratchOffset = scratchTotal;
             scratchTotal += align(tlasSizes(stack, sizes), scratchAlign);
             ensureScratch(scratchTotal);
@@ -207,8 +209,8 @@ public final class SceneAccel implements AutoCloseable {
             }
             boolean builtBlas = !pending.isEmpty();
             pending.clear();
-            if (boxCount > 0) {
-                recordBoxBlas(stack, cmd, anchorX, anchorY, anchorZ, scratch.deviceAddress() + boxScratchOffset);
+            if (shadowQuads > 0) {
+                recordShadowBlas(stack, cmd, scratch.deviceAddress() + shadowScratchOffset);
                 builtBlas = true;
             }
             if (builtBlas) Barriers.full(cmd);
@@ -306,62 +308,39 @@ public final class SceneAccel implements AutoCloseable {
         }
     }
 
-    // ------------------------------------------------------- entity boxes
+    // ------------------------------------------------------ shadow casters
 
-    private VkAccelerationStructureBuildGeometryInfoKHR.Buffer boxBuildInfo(MemoryStack stack) {
+    private VkAccelerationStructureBuildGeometryInfoKHR.Buffer shadowBuildInfo(MemoryStack stack) {
         VkAccelerationStructureGeometryKHR.Buffer geom = VkAccelerationStructureGeometryKHR.calloc(1, stack);
-        triangles(geom.get(0), boxVertices.deviceAddress(), 12, MAX_SHADOW_BOXES * BOX_VERTICES,
-                boxIndices.deviceAddress(), VK_GEOMETRY_OPAQUE_BIT_KHR);
+        triangles(geom.get(0), shadowVertexBuffer.deviceAddress(), 12, MAX_SHADOW_QUADS * 4,
+                indexBuffer.deviceAddress(), VK_GEOMETRY_OPAQUE_BIT_KHR);
         return buildInfo(stack, geom, 1, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
                 VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR);
     }
 
-    /** Allocates the (max-size) box BLAS once; returns its scratch size. */
-    private long prepareBoxBlas(MemoryStack stack, VkAccelerationStructureBuildSizesInfoKHR sizes) {
+    /** Allocates the (max-size) shadow caster BLAS once; returns its scratch size. */
+    private long prepareShadowBlas(MemoryStack stack, VkAccelerationStructureBuildSizesInfoKHR sizes) {
         vkGetAccelerationStructureBuildSizesKHR(ctx.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                boxBuildInfo(stack).get(0), stack.ints(MAX_SHADOW_BOXES * 12), sizes);
-        if (boxBlas == VK_NULL_HANDLE) {
-            boxBlasBuffer = GpuBuffer.deviceLocal(ctx, sizes.accelerationStructureSize(),
+                shadowBuildInfo(stack).get(0), stack.ints(MAX_SHADOW_QUADS * 2), sizes);
+        if (shadowBlas == VK_NULL_HANDLE) {
+            shadowBlasBuffer = GpuBuffer.deviceLocal(ctx, sizes.accelerationStructureSize(),
                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, 256);
-            boxBlas = createAs(boxBlasBuffer, sizes.accelerationStructureSize(), VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
-            boxBlasAddress = asAddress(boxBlas);
+            shadowBlas = createAs(shadowBlasBuffer, sizes.accelerationStructureSize(), VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+            shadowBlasAddress = asAddress(shadowBlas);
         }
         return sizes.buildScratchSize();
     }
 
-    private void recordBoxBlas(MemoryStack stack, VkCommandBuffer cmd, long ax, long ay, long az, long scratchAddress) {
-        FloatBuffer v = boxVertices.mapped().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
-        for (int b = 0; b < boxCount; b++) {
-            int o = b * 6;
-            float x0 = (float) (boxes[o] - ax), y0 = (float) (boxes[o + 1] - ay), z0 = (float) (boxes[o + 2] - az);
-            float x1 = (float) (boxes[o + 3] - ax), y1 = (float) (boxes[o + 4] - ay), z1 = (float) (boxes[o + 5] - az);
-            for (int c = 0; c < BOX_VERTICES; c++) {
-                v.put((c & 1) == 0 ? x0 : x1).put((c & 2) == 0 ? y0 : y1).put((c & 4) == 0 ? z0 : z1);
-            }
-        }
-        boxVertices.flush();
+    private void recordShadowBlas(MemoryStack stack, VkCommandBuffer cmd, long scratchAddress) {
+        shadowVertexBuffer.mapped().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().put(shadowVertices, 0, shadowQuads * 12);
+        shadowVertexBuffer.flush();
         try (MemoryStack inner = stack.push()) {
-            var info = boxBuildInfo(inner);
-            info.get(0).dstAccelerationStructure(boxBlas).scratchData(d -> d.deviceAddress(scratchAddress));
+            var info = shadowBuildInfo(inner);
+            info.get(0).dstAccelerationStructure(shadowBlas).scratchData(d -> d.deviceAddress(scratchAddress));
             VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, inner)
-                    .primitiveCount(boxCount * 12);
+                    .primitiveCount(shadowQuads * 2);
             vkCmdBuildAccelerationStructuresKHR(cmd, info, inner.pointers(range));
         }
-    }
-
-    private void writeBoxIndices() {
-        // Corner c has x = c&1, y = c&2, z = c&4. Two triangles per face.
-        int[] faces = {0, 1, 3, 2, /* -z */ 4, 6, 7, 5, /* +z */ 0, 4, 5, 1, /* -y */
-                2, 3, 7, 6, /* +y */ 0, 2, 6, 4, /* -x */ 1, 5, 7, 3 /* +x */};
-        IntBuffer idx = boxIndices.mapped().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
-        for (int b = 0; b < MAX_SHADOW_BOXES; b++) {
-            int base = b * BOX_VERTICES;
-            for (int f = 0; f < 6; f++) {
-                int a = faces[f * 4], c = faces[f * 4 + 1], d = faces[f * 4 + 2], e = faces[f * 4 + 3];
-                idx.put(base + a).put(base + c).put(base + d).put(base + a).put(base + d).put(base + e);
-            }
-        }
-        boxIndices.flush();
     }
 
     // ----------------------------------------------------------------- TLAS
@@ -415,16 +394,19 @@ public final class SceneAccel implements AutoCloseable {
             table.putInt(i * GEOMETRY_ENTRY_SIZE + 12, 0);
             i++;
         }
-        if (boxCount > 0) {
-            // Box vertices are already anchor-relative. Only shadow rays (mask 0xFF) see this instance,
-            // and they skip closest-hit shading, so it needs no geometry table entry.
-            translation(transform, 0, 0, 0);
+        if (shadowQuads > 0) {
+            // Only shadow rays (mask 0xFF) see this instance, and they skip closest-hit shading, so it
+            // needs no geometry table entry.
+            transform.clear();
+            transform.put(1).put(0).put(0).put((float) (shadowOriginX - ax))
+                    .put(0).put(1).put(0).put((float) (shadowOriginY - ay))
+                    .put(0).put(0).put(1).put((float) (shadowOriginZ - az)).flip();
             inst.get(i).transform().matrix(transform);
             inst.get(i).instanceCustomIndex(0)
                     .mask(MASK_SHADOW_CASTER)
                     .instanceShaderBindingTableRecordOffset(0)
                     .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR)
-                    .accelerationStructureReference(boxBlasAddress);
+                    .accelerationStructureReference(shadowBlasAddress);
             i++;
         }
         instanceCount = i;
@@ -521,15 +503,14 @@ public final class SceneAccel implements AutoCloseable {
             vkDestroyAccelerationStructureKHR(ctx.device, tlas, null);
             tlasBuffer.close();
         }
-        if (boxBlas != VK_NULL_HANDLE) {
-            vkDestroyAccelerationStructureKHR(ctx.device, boxBlas, null);
-            boxBlasBuffer.close();
+        if (shadowBlas != VK_NULL_HANDLE) {
+            vkDestroyAccelerationStructureKHR(ctx.device, shadowBlas, null);
+            shadowBlasBuffer.close();
         }
         if (scratch != null) scratch.close();
         indexBuffer.close();
         instances.close();
         geometryTable.close();
-        boxVertices.close();
-        boxIndices.close();
+        shadowVertexBuffer.close();
     }
 }

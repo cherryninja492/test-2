@@ -16,8 +16,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * Hooks Helios into vanilla world rendering:
  * <ul>
  *   <li>{@code renderLevel} HEAD: capture camera matrices for the frame.</li>
- *   <li>{@code renderSky}: replaced by the ray traced frame (colour + depth), drawn right after
- *       vanilla clears the framebuffer, so everything vanilla draws afterwards (entities, block
+ *   <li>{@code renderSky} RETURN: the ray traced frame (colour + depth) is drawn over vanilla's sky
+ *       (sun, moon, stars, sunsets), so everything vanilla draws afterwards (entities, block
  *       entities, particles, clouds, weather, hand) is depth tested against it.</li>
  *   <li>{@code renderSectionLayer}: vanilla terrain is skipped while Helios is active.</li>
  *   <li>{@code setSectionDirty}: block changes re-mesh the affected section.</li>
@@ -32,11 +32,9 @@ public abstract class LevelRendererMixin {
         HeliosPipeline.INSTANCE.beginLevel(deltaTracker, camera, frustumMatrix, projectionMatrix);
     }
 
-    @Inject(method = "renderSky", at = @At("HEAD"), cancellable = true)
-    private void helios$renderSky(CallbackInfo ci) {
-        if (HeliosPipeline.INSTANCE.renderInPlaceOfSky()) {
-            ci.cancel();
-        }
+    @Inject(method = "renderSky", at = @At("RETURN"))
+    private void helios$afterSky(CallbackInfo ci) {
+        HeliosPipeline.INSTANCE.renderAfterSky();
     }
 
     @Inject(method = "renderSectionLayer", at = @At("HEAD"), cancellable = true)

@@ -4,7 +4,6 @@ import dev.helios.core.FrameInput;
 import dev.helios.core.HeliosRenderer;
 import dev.helios.core.geometry.SectionGeometry;
 import dev.helios.core.math.Lighting;
-import dev.helios.core.rt.SceneAccel;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -12,10 +11,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.material.FogType;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -44,8 +40,7 @@ public final class HeliosPipeline {
     private int rendererGeneration = -1;
     private boolean atlasDirty = true;
     private final SectionMesher mesher = new SectionMesher();
-    private final double[] shadowBoxes = new double[SceneAccel.MAX_SHADOW_BOXES * 6];
-    private static final double SHADOW_CASTER_RANGE = 96.0;
+    private final EntityShadowCapture entityShadows = new EntityShadowCapture();
 
     // Captured at the start of LevelRenderer#renderLevel.
     private final Matrix4f viewRotation = new Matrix4f();
@@ -89,10 +84,10 @@ public final class HeliosPipeline {
     }
 
     /**
-     * Renders the ray traced frame and composites it into the main framebuffer in place of the
-     * vanilla sky. Returns false if vanilla rendering should proceed instead.
+     * Renders the ray traced frame and composites it over the vanilla sky (sky pixels are left
+     * as drawn by Minecraft). Returns false if vanilla terrain rendering should proceed instead.
      */
-    public boolean renderInPlaceOfSky() {
+    public boolean renderAfterSky() {
         if (!frameActive) return false;
         try {
             renderFrame();
@@ -155,8 +150,8 @@ public final class HeliosPipeline {
 
         Vec3 cam = camera.getPosition();
         meshSections(level, cam);
-        if (config.entityShadows) collectShadowCasters(level, cam);
-        else renderer.setShadowCasters(shadowBoxes, 0);
+        if (config.entityShadows) entityShadows.capture(renderer, level, cam, partialTick);
+        else renderer.setShadowGeometry(new float[0], 0, cam.x, cam.y, cam.z);
 
         int width = mc.getMainRenderTarget().width;
         int height = mc.getMainRenderTarget().height;
@@ -197,28 +192,6 @@ public final class HeliosPipeline {
             }
             if (System.nanoTime() > deadline) break;
         }
-    }
-
-    /** Entity bounding boxes near the camera (including the player) become shadow-only proxies. */
-    private void collectShadowCasters(ClientLevel level, Vec3 cam) {
-        int count = 0;
-        for (Entity entity : level.entitiesForRendering()) {
-            if (!(entity instanceof LivingEntity) || entity.isInvisible()) continue;
-            Vec3 pos = entity.getPosition(partialTick);
-            if (pos.distanceToSqr(cam) > SHADOW_CASTER_RANGE * SHADOW_CASTER_RANGE) continue;
-            AABB box = entity.getBoundingBox().move(pos.subtract(entity.position()));
-            // Slightly slimmer than the hitbox so the blocky proxy reads more like the model.
-            double insetX = box.getXsize() * 0.15, insetZ = box.getZsize() * 0.15;
-            int o = count * 6;
-            shadowBoxes[o] = box.minX + insetX;
-            shadowBoxes[o + 1] = box.minY;
-            shadowBoxes[o + 2] = box.minZ + insetZ;
-            shadowBoxes[o + 3] = box.maxX - insetX;
-            shadowBoxes[o + 4] = box.maxY;
-            shadowBoxes[o + 5] = box.maxZ - insetZ;
-            if (++count == SceneAccel.MAX_SHADOW_BOXES) break;
-        }
-        renderer.setShadowCasters(shadowBoxes, count);
     }
 
     /** Lines for the F3 debug screen. */

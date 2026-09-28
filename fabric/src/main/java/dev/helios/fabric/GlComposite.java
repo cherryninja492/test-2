@@ -49,8 +49,10 @@ final class GlComposite implements AutoCloseable {
             void main() {
                 // Vulkan row 0 is the top of the image; GL texture row 0 is sampled at t = 0.
                 vec2 t = vec2(uv.x, 1.0 - uv.y);
+                float depth = texture(uDepth, t).r;
+                if (depth >= 1.0) discard; // sky: keep what vanilla drew (sun, moon, stars, sunsets)
                 fragColor = vec4(texture(uColor, t).rgb, 1.0);
-                gl_FragDepth = texture(uDepth, t).r;
+                gl_FragDepth = depth;
             }
             """;
 

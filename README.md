@@ -12,9 +12,10 @@ result back to OpenGL.
 
 - **Path traced global illumination**: diffuse bounces (default 2) with Russian roulette.
 - **Ray traced sun/moon shadows** with soft penumbrae, following the day/night cycle and rain.
-- **Emissive blocks** (torches, glowstone, lava…) light the world from their light level.
+- **Emissive blocks** (torches, glowstone, lava…) light the world, combining ray traced emission
+  with Minecraft's block light levels.
 - **Water** you can see into, with depth-based absorption, Fresnel reflections and underwater fog.
-- **Entity shadows**: mobs and players cast (box-shaped) ray traced shadows.
+- **Entity shadows**: mobs, players (including you) and items cast ray traced shadows from their animated models.
 - **Alpha-tested foliage** (leaves, grass, flowers) via an any-hit shader.
 - **Denoiser**: temporal accumulation + edge-aware à-trous wavelet filter on demodulated lighting.
 - **Upscaling**: NVIDIA DLSS Super Resolution (DLAA…Ultra Performance) when available, otherwise
@@ -50,7 +51,7 @@ result back to OpenGL.
 | `exposure` | `1.0` | |
 | `sectionsPerFrame` | `64` | max chunk sections meshed per frame |
 | `meshBudgetMs` | `3.0` | time per frame spent meshing chunk sections |
-| `entityShadows` | `true` | mobs and players cast box-shaped shadows |
+| `entityShadows` | `true` | entities (mobs, players, items) cast ray traced shadows from their models |
 | `validation` | `false` | Vulkan validation layers (or `-Dhelios.validation=true`) |
 
 ## How it works
@@ -106,8 +107,8 @@ This is an early (0.1) implementation. What has and hasn't been verified:
 Known limitations / next steps:
 
 - Incompatible with Sodium and Iris (they replace the same rendering code).
-- Entities are rasterized by vanilla; their ray traced shadows use their bounding boxes, and they do
-  not appear in reflections.
-- Fluids use simplified flat surfaces; no refraction, no caustics.
+- Entities are rasterized by vanilla; they cast ray traced shadows but are not lit by the ray
+  tracer and do not appear in reflections.
+- Water has no refraction or caustics; the sky seen in reflections is an approximation of vanilla's.
 - Emissive blocks are sampled only by bounce rays; many small lights are noisy (ReSTIR would fix this).
 - No PBR/LabPBR resource-pack support yet (normal/specular maps).
