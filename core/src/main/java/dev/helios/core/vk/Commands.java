@@ -56,6 +56,31 @@ public final class Commands {
         }
     }
 
+    /**
+     * Ends and submits {@code cmd} without waiting. Optionally waits on / signals a semaphore
+     * (VK_NULL_HANDLE to skip). Wait for completion later with {@link #waitAndReset}.
+     */
+    public static void submit(VulkanContext ctx, VkCommandBuffer cmd, long fence, long waitSemaphore, long signalSemaphore) {
+        try (MemoryStack stack = stackPush()) {
+            check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+            VkSubmitInfo submit = VkSubmitInfo.calloc(stack).sType$Default().pCommandBuffers(stack.pointers(cmd));
+            if (waitSemaphore != VK_NULL_HANDLE) {
+                submit.waitSemaphoreCount(1)
+                        .pWaitSemaphores(stack.longs(waitSemaphore))
+                        .pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
+            }
+            if (signalSemaphore != VK_NULL_HANDLE) {
+                submit.pSignalSemaphores(stack.longs(signalSemaphore));
+            }
+            check(vkQueueSubmit(ctx.queue, submit, fence), "vkQueueSubmit");
+        }
+    }
+
+    public static void waitAndReset(VulkanContext ctx, long fence) {
+        check(vkWaitForFences(ctx.device, fence, true, FENCE_TIMEOUT_NS), "vkWaitForFences");
+        check(vkResetFences(ctx.device, fence), "vkResetFences");
+    }
+
     /** Records and runs a one-off command buffer (uploads, layout transitions). */
     public static void immediate(VulkanContext ctx, Consumer<VkCommandBuffer> recorder) {
         VkCommandBuffer cmd = allocate(ctx);

@@ -8,7 +8,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, rgba16f) uniform readonly image2D currentIllumination;
 layout(binding = 1, rgba32f) uniform readonly image2D normalDepth;
-layout(binding = 2, rg16f) uniform readonly image2D motionVectors;
+layout(binding = 2, rgba16f) uniform readonly image2D motionVectors; // xy motion, z expected previous distance
 layout(binding = 3, rgba32f) uniform readonly image2D prevNormalDepth;
 layout(binding = 4, rgba16f) uniform readonly image2D historyIn;
 layout(binding = 5, rgba16f) uniform writeonly image2D historyOut;
@@ -19,11 +19,15 @@ layout(push_constant) uniform Push {
     float maxHistory;
 } pc;
 
-bool consistent(vec4 current, vec4 previous) {
+// Compares the previous frame's surface with where this pixel's surface was expected to be:
+// its distance from the previous camera position (not the current one), so moving does not
+// throw history away.
+bool consistent(vec4 current, float expectedPrevDistance, vec4 previous) {
     bool currentSky = current.w >= SKY_DEPTH * 0.5;
     bool previousSky = previous.w >= SKY_DEPTH * 0.5;
     if (currentSky || previousSky) return currentSky == previousSky;
-    return dot(current.xyz, previous.xyz) > 0.9 && abs(current.w - previous.w) < 0.1 * current.w + 0.1;
+    return dot(current.xyz, previous.xyz) > 0.9
+        && abs(expectedPrevDistance - previous.w) < 0.03 * expectedPrevDistance + 0.05;
 }
 
 void main() {
@@ -32,7 +36,8 @@ void main() {
 
     vec3 current = imageLoad(currentIllumination, p).rgb;
     vec4 nd = imageLoad(normalDepth, p);
-    vec2 motion = imageLoad(motionVectors, p).xy;
+    vec4 motionData = imageLoad(motionVectors, p);
+    vec2 motion = motionData.xy;
 
     vec2 prevPos = vec2(p) + 0.5 + motion * vec2(pc.size) - 0.5;
     ivec2 base = ivec2(floor(prevPos));
@@ -45,7 +50,7 @@ void main() {
             ivec2 o = ivec2(i & 1, i >> 1);
             ivec2 q = base + o;
             if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, pc.size))) continue;
-            if (!consistent(nd, imageLoad(prevNormalDepth, q))) continue;
+            if (!consistent(nd, motionData.z, imageLoad(prevNormalDepth, q))) continue;
             float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
             sum += imageLoad(historyIn, q) * w;
             weightSum += w;

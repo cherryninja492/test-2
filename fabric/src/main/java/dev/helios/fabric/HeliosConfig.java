@@ -19,7 +19,11 @@ public final class HeliosConfig {
 
     public boolean enabled = true;
     /** Chunk sections meshed and uploaded per frame. */
-    public int sectionsPerFrame = 24;
+    public int sectionsPerFrame = 64;
+    /** Milliseconds per frame spent meshing chunk sections (at least one section is always meshed). */
+    public float meshBudgetMs = 3.0f;
+    /** Mobs and players cast (box-shaped) ray traced shadows. */
+    public boolean entityShadows = true;
     public final RendererSettings renderer = new RendererSettings();
 
     private final Path file;
@@ -37,6 +41,8 @@ public final class HeliosConfig {
                 RendererSettings s = config.renderer;
                 config.enabled = Boolean.parseBoolean(p.getProperty("enabled", "true"));
                 config.sectionsPerFrame = parseInt(p, "sectionsPerFrame", config.sectionsPerFrame);
+                config.meshBudgetMs = Float.parseFloat(p.getProperty("meshBudgetMs", String.valueOf(config.meshBudgetMs)));
+                config.entityShadows = Boolean.parseBoolean(p.getProperty("entityShadows", String.valueOf(config.entityShadows)));
                 s.upscaler = parseEnum(p, "upscaler", UpscalerBackend.class, s.upscaler);
                 s.quality = parseEnum(p, "quality", UpscaleQuality.class, s.quality);
                 s.maxBounces = parseInt(p, "maxBounces", s.maxBounces);
@@ -59,6 +65,8 @@ public final class HeliosConfig {
         RendererSettings s = renderer;
         p.setProperty("enabled", String.valueOf(enabled));
         p.setProperty("sectionsPerFrame", String.valueOf(sectionsPerFrame));
+        p.setProperty("meshBudgetMs", String.valueOf(meshBudgetMs));
+        p.setProperty("entityShadows", String.valueOf(entityShadows));
         p.setProperty("upscaler", s.upscaler.name());
         p.setProperty("quality", s.quality.name());
         p.setProperty("maxBounces", String.valueOf(s.maxBounces));

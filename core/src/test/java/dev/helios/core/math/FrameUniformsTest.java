@@ -64,8 +64,8 @@ class FrameUniformsTest {
         u.update(0.5, 0.5, 0.5, new Matrix4f(), PROJ);
         ByteBuffer b = ByteBuffer.allocate(FrameUniforms.SIZE).order(ByteOrder.LITTLE_ENDIAN);
         u.write(b, new float[] {0.25f, -0.125f}, 1280, 720, new Vector3f(0, 1, 0), 0.8f,
-                new Vector3f(0.2f, 0.4f, 1f), 0.5f, 42, 3, 2, FrameUniforms.FLAG_ACCUMULATE_RESET);
-        assertEquals(272, FrameUniforms.SIZE);
+                new Vector3f(0.2f, 0.4f, 1f), 0.5f, 42, 3, 2, FrameUniforms.FLAG_ACCUMULATE_RESET, 0.001f);
+        assertEquals(304, FrameUniforms.SIZE);
         assertEquals(0.5f, b.getFloat(192));       // cameraPos.x
         assertEquals(0.8f, b.getFloat(208 + 12));  // lightDir.w
         assertEquals(0.5f, b.getFloat(224 + 12));  // skyColor.w (rain)
@@ -74,6 +74,25 @@ class FrameUniformsTest {
         assertEquals(42, b.getInt(256));
         assertEquals(3, b.getInt(260));
         assertEquals(FrameUniforms.FLAG_ACCUMULATE_RESET, b.getInt(268));
+        assertEquals(0.5f, b.getFloat(272));       // prevCameraPos.x (first frame: same as current)
+        assertEquals(0.001f, b.getFloat(288));     // params.x pixel angle
+    }
+
+    @Test
+    void previousCameraIsRelativeToCurrentAnchor() {
+        FrameUniforms u = new FrameUniforms();
+        u.update(10.5, 64.25, -3.75, new Matrix4f(), PROJ);
+        u.update(11.25, 64.25, -3.75, new Matrix4f(), PROJ);
+        // anchor x is now 11, previous camera x was 10.5
+        assertEquals(-0.5f, u.prevCameraRelative().x, 1e-6);
+        assertEquals(0.25f, u.cameraRelative().x, 1e-6);
+    }
+
+    @Test
+    void pixelAngleMatchesFieldOfView() {
+        float angle = FrameUniforms.pixelAngle(PROJ, 1000);
+        // 70 degree vertical FOV over 1000 pixels is about 0.0014 rad per pixel near the centre
+        assertEquals(2 * Math.tan(Math.toRadians(35)) / 1000, angle, 1e-6);
     }
 
     @Test

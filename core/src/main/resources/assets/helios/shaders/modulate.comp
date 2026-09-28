@@ -1,12 +1,14 @@
 #version 460
 
-// Re-applies the primary surface albedo to the (denoised) illumination.
+// Final render-resolution colour: (denoised indirect + direct) * albedo + specular.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(binding = 0, rgba16f) uniform readonly image2D illumination;
+layout(binding = 0, rgba16f) uniform readonly image2D indirect;
 layout(binding = 1, rgba16f) uniform readonly image2D albedo;
 layout(binding = 2, rgba16f) uniform writeonly image2D outColor;
+layout(binding = 3, rgba16f) uniform readonly image2D direct;
+layout(binding = 4, rgba16f) uniform readonly image2D specular;
 
 layout(push_constant) uniform Push {
     ivec2 size;
@@ -16,6 +18,7 @@ layout(push_constant) uniform Push {
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, pc.size))) return;
-    vec3 color = imageLoad(illumination, p).rgb * imageLoad(albedo, p).rgb;
+    vec3 diffuse = imageLoad(indirect, p).rgb + imageLoad(direct, p).rgb;
+    vec3 color = diffuse * imageLoad(albedo, p).rgb + imageLoad(specular, p).rgb;
     imageStore(outColor, p, vec4(color, 1.0));
 }

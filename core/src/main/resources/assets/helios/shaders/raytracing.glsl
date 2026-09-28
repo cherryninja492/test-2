@@ -5,13 +5,27 @@
 
 #include "common.glsl"
 
-const float SUN_ANGULAR_RADIUS = 0.02;     // radians; larger than the real sun for softer shadows
+const float SUN_ANGULAR_RADIUS = 0.012;    // radians; a bit larger than the real sun for soft edges
 const vec3 SUN_COLOR = vec3(1.0, 0.94, 0.86);
-const float SUN_STRENGTH = 2.6;            // irradiance / PI folded into one factor
+const float SUN_STRENGTH = 3.2;            // irradiance / PI folded into one factor
+const float SKY_AMBIENT = 0.55;            // sky radiance scale for indirect light (sun:sky balance)
 const float SUN_DISK_RADIANCE = 40.0;
 const float EMISSION_STRENGTH = 4.0;       // radiance of a light level 15 block, relative to albedo
 const float MAX_DISTANCE = 4096.0;
 const float RAY_EPSILON = 1.0e-3;
+
+// Instance masks
+const uint MASK_WORLD = 0x01u;             // chunk sections: visible to every ray
+const uint MASK_SHADOW_CASTER = 0x02u;     // entity proxies: only shadow rays hit them
+const uint MASK_ALL = 0xFFu;
+
+// frameInfo.w flags
+const uint FLAG_RESET = 1u;
+const uint FLAG_CAMERA_UNDERWATER = 2u;
+
+// Water optics (per block travelled)
+const vec3 WATER_ABSORPTION = vec3(0.32, 0.075, 0.055);
+const vec3 WATER_SCATTER = vec3(0.035, 0.11, 0.14);
 
 layout(set = 0, binding = 1, std140) uniform FrameUBO {
     mat4 invViewProj;   // unjittered, camera-anchor relative
@@ -22,6 +36,8 @@ layout(set = 0, binding = 1, std140) uniform FrameUBO {
     vec4 skyColor;      // rgb linear zenith colour, w rain
     vec4 jitter;        // xy jitter in pixels (+y down), zw render size
     uvec4 frameInfo;    // x frame index, y max bounces, z samples per pixel, w flags
+    vec4 prevCameraPos; // previous camera position, relative to the current anchor
+    vec4 params;        // x angular size of one render pixel (radians)
 } frame;
 
 // Vertex layout written by SectionGeometry (32 bytes, scalar).

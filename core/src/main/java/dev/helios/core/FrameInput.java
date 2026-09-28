@@ -13,6 +13,7 @@ import org.joml.Vector3f;
  * @param lightIntensity  0..1 multiplier for the directional light
  * @param skyColor        linear zenith sky colour
  * @param rain            0..1 rain strength
+ * @param cameraUnderwater the camera is inside water (enables in-water absorption from the eye)
  */
 public record FrameInput(
         double cameraX, double cameraY, double cameraZ,
@@ -21,5 +22,6 @@ public record FrameInput(
         Vector3f lightDirection,
         float lightIntensity,
         Vector3f skyColor,
-        float rain) {
+        float rain,
+        boolean cameraUnderwater) {
 }

@@ -98,6 +98,11 @@ public final class Descriptors {
     }
 
     public static long sampler(VulkanContext ctx, int filter) {
+        return sampler(ctx, filter, 0f);
+    }
+
+    /** Clamp-to-edge sampler; {@code maxLod > 0} enables nearest-mip sampling up to that level. */
+    public static long sampler(VulkanContext ctx, int filter, float maxLod) {
         try (MemoryStack stack = stackPush()) {
             VkSamplerCreateInfo info = VkSamplerCreateInfo.calloc(stack).sType$Default()
                     .magFilter(filter).minFilter(filter)
@@ -105,7 +110,7 @@ public final class Descriptors {
                     .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
                     .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
                     .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-                    .maxLod(0f);
+                    .maxLod(maxLod);
             var p = stack.mallocLong(1);
             check(vkCreateSampler(ctx.device, info, null, p), "vkCreateSampler");
             return p.get(0);

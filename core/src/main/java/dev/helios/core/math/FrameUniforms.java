@@ -15,14 +15,16 @@ import java.nio.ByteOrder;
  * the current anchor so motion vectors are correct when the anchor moves.
  */
 public final class FrameUniforms {
-    public static final int SIZE = 3 * 64 + 5 * 16;
+    public static final int SIZE = 3 * 64 + 7 * 16;
 
     public static final int FLAG_ACCUMULATE_RESET = 1;
+    public static final int FLAG_CAMERA_UNDERWATER = 2;
 
     private final Matrix4f viewProj = new Matrix4f();
     private final Matrix4f invViewProj = new Matrix4f();
     private final Matrix4f prevViewProj = new Matrix4f();
     private final Vector3f cameraRel = new Vector3f();
+    private final Vector3f prevCameraRel = new Vector3f();
 
     private long anchorX, anchorY, anchorZ;
     private double camX, camY, camZ;
@@ -55,6 +57,7 @@ public final class FrameUniforms {
         }
         prevViewProj.set(prevProj).mul(prevView).translate(
                 (float) (anchorX - prevCamX), (float) (anchorY - prevCamY), (float) (anchorZ - prevCamZ));
+        prevCameraRel.set((float) (prevCamX - anchorX), (float) (prevCamY - anchorY), (float) (prevCamZ - anchorZ));
 
         prevView.set(viewRotation);
         prevProj.set(projection);
@@ -84,6 +87,10 @@ public final class FrameUniforms {
         return cameraRel;
     }
 
+    public Vector3f prevCameraRelative() {
+        return prevCameraRel;
+    }
+
     public Matrix4f viewProj() {
         return viewProj;
     }
@@ -110,7 +117,7 @@ public final class FrameUniforms {
 
     public void write(ByteBuffer dst, float[] jitterPx, int renderWidth, int renderHeight,
                       Vector3f lightDir, float lightIntensity, Vector3f skyColor, float rain,
-                      int frameIndex, int maxBounces, int samplesPerPixel, int flags) {
+                      int frameIndex, int maxBounces, int samplesPerPixel, int flags, float pixelAngle) {
         ByteBuffer b = dst.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         putMatrix(b, invViewProj);
         putMatrix(b, viewProj);
@@ -120,6 +127,14 @@ public final class FrameUniforms {
         b.putFloat(skyColor.x).putFloat(skyColor.y).putFloat(skyColor.z).putFloat(rain);
         b.putFloat(jitterPx[0]).putFloat(jitterPx[1]).putFloat(renderWidth).putFloat(renderHeight);
         b.putInt(frameIndex).putInt(maxBounces).putInt(samplesPerPixel).putInt(flags);
+        b.putFloat(prevCameraRel.x).putFloat(prevCameraRel.y).putFloat(prevCameraRel.z).putFloat(0f);
+        b.putFloat(pixelAngle).putFloat(0f).putFloat(0f).putFloat(0f);
+    }
+
+    /** Angular size of one render pixel (radians), for texture LOD selection. */
+    public static float pixelAngle(Matrix4f projection, int renderHeight) {
+        // projection.m11() = 1 / tan(fovY / 2)
+        return 2f / (projection.m11() * renderHeight);
     }
 
     // Column-major, as std140 expects. Goes through a float[] so heap and direct buffers both work.

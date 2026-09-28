@@ -16,6 +16,7 @@ import org.lwjgl.vulkan.*;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.LongBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,13 +31,15 @@ import static org.lwjgl.vulkan.VK10.*;
  * section meshes, the block atlas and camera state, and composites its output into Minecraft's
  * OpenGL framebuffer through shared memory.
  *
- * <p>Per frame: build changed BLAS + TLAS, path trace at render resolution (demodulated
- * illumination, albedo, normal/depth, motion, depth), temporal accumulation, à-trous wavelet
- * denoising, re-modulation, upscaling (DLSS or built-in TAAU) to display resolution and tonemapping
- * into an image exported to OpenGL.
+ * <p>Per frame: build changed BLAS + TLAS, path trace at render resolution (direct light,
+ * demodulated indirect light, albedo, specular, normal/depth, motion, depth), temporal accumulation
+ * and à-trous denoising of the indirect light, modulation, upscaling (DLSS or built-in TAAU) to
+ * display resolution and tonemapping into an image shared with OpenGL.
  *
- * <p>All methods must be called from the thread owning the renderer (Minecraft's render thread).
- * {@link #renderFrame} waits for the GPU before returning.
+ * <p>Frames are pipelined: {@link #renderFrame} returns right after submitting. When OpenGL supports
+ * {@code GL_EXT_semaphore} ({@link #exportSemaphores}), GPU semaphores order Vulkan and GL work;
+ * otherwise {@link #renderFrame} waits for the GPU before returning. All methods must be called from
+ * one thread (Minecraft's render thread).
  */
 public final class HeliosRenderer implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger("Helios");
@@ -46,18 +49,30 @@ public final class HeliosRenderer implements AutoCloseable {
     }
 
     /**
-     * @param color       RGBA8, display resolution, tonemapped and gamma encoded, row 0 = top
-     * @param depth       R32F, render resolution, OpenGL window-space depth (1 = sky), row 0 = top
+     * @param color        RGBA8, display resolution, tonemapped and gamma encoded, row 0 = top
+     * @param depth        R32F, render resolution, OpenGL window-space depth (1 = sky), row 0 = top
      * @param win32Handles true if handles are Win32 NT handles, false for POSIX fds
      */
     public record SharedTargets(SharedImage color, SharedImage depth, boolean win32Handles) {
     }
 
+    /**
+     * Semaphores for GL interop: GL waits on {@code vulkanDone} before reading the shared images and
+     * signals {@code glDone} afterwards (then calls {@link #markGlSignaled}).
+     */
+    public record SharedSemaphores(long vulkanDone, long glDone, boolean win32Handles) {
+    }
+
+    /** GPU time of the last completed frame, in milliseconds. */
+    public record GpuTimings(float accelerationAndTrace, float denoise, float upscaleAndTonemap, float total) {
+    }
+
     private static final int USAGE_STORAGE = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
             | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     private static final int MAX_HISTORY = 32;
+    private static final int TIMESTAMPS = 4;
 
-    // Modulate pass descriptor sets, by illumination source.
+    // Modulate pass descriptor sets, by indirect-light source.
     private static final int MOD_FROM_A = 0, MOD_FROM_B = 1, MOD_FROM_HISTORY0 = 2, MOD_FROM_RAW = 4;
 
     private final RendererSettings settings;
@@ -67,18 +82,25 @@ public final class HeliosRenderer implements AutoCloseable {
     private final long descriptorPool;
     private final long rtSet;
     private final GpuBuffer frameUbo;
-    private final long nearestSampler, linearSampler;
+    private final long linearSampler;
+    private long atlasSampler = VK_NULL_HANDLE;
     private final ComputePass temporal, atrous, modulate, taau, tonemap;
     private final DlssUpscaler dlss;
     private final VkCommandBuffer cmd;
     private final long fence;
+    private final long queryPool;
     private final FrameUniforms uniforms = new FrameUniforms();
     private final ByteBuffer push = MemoryUtil.memAlloc(32).order(ByteOrder.LITTLE_ENDIAN);
+
+    private SharedSemaphore vulkanDone, glDone;
+    private boolean glSignaled;
+    private boolean frameInFlight;
+    private GpuTimings timings = new GpuTimings(0, 0, 0, 0);
 
     private GpuImage atlas;
 
     // Render resolution
-    private GpuImage illumination, albedo, normalDepth, prevNormalDepth, motion, depth;
+    private GpuImage indirect, direct, specular, albedo, normalDepth, prevNormalDepth, motion, depth;
     private final GpuImage[] history = new GpuImage[2];
     private GpuImage atrousA, atrousB, denoised;
     // Display resolution
@@ -119,7 +141,6 @@ public final class HeliosRenderer implements AutoCloseable {
 
         scene = new SceneAccel(ctx);
         descriptorPool = Descriptors.createPool(ctx, 32);
-        nearestSampler = Descriptors.sampler(ctx, VK_FILTER_NEAREST);
         linearSampler = Descriptors.sampler(ctx, VK_FILTER_LINEAR);
         frameUbo = GpuBuffer.hostVisible(ctx, FrameUniforms.SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
@@ -132,7 +153,7 @@ public final class HeliosRenderer implements AutoCloseable {
             atrous = new ComputePass(ctx, compiler, descriptorPool, "atrous.comp", 16, 4,
                     storage, storage, storage);
             modulate = new ComputePass(ctx, compiler, descriptorPool, "modulate.comp", 16, 5,
-                    storage, storage, storage);
+                    storage, storage, storage, storage, storage);
             taau = new ComputePass(ctx, compiler, descriptorPool, "taau.comp", 32, 2,
                     sampled, storage, sampled, storage);
             tonemap = new ComputePass(ctx, compiler, descriptorPool, "tonemap.comp", 16, 3,
@@ -143,10 +164,22 @@ public final class HeliosRenderer implements AutoCloseable {
 
         cmd = Commands.allocate(ctx);
         fence = Commands.createFence(ctx);
+        queryPool = createQueryPool();
 
         ByteBuffer white = MemoryUtil.memAlloc(4).putInt(0, -1);
-        uploadAtlas(1, 1, white);
+        uploadAtlas(1, 1, List.of(white));
         MemoryUtil.memFree(white);
+    }
+
+    private long createQueryPool() {
+        try (MemoryStack stack = stackPush()) {
+            VkQueryPoolCreateInfo info = VkQueryPoolCreateInfo.calloc(stack).sType$Default()
+                    .queryType(VK_QUERY_TYPE_TIMESTAMP)
+                    .queryCount(TIMESTAMPS);
+            var p = stack.mallocLong(1);
+            VkCheck.check(vkCreateQueryPool(ctx.device, info, null, p), "vkCreateQueryPool");
+            return p.get(0);
+        }
     }
 
     // ------------------------------------------------------------------ scene
@@ -169,28 +202,56 @@ public final class HeliosRenderer implements AutoCloseable {
         return scene.sectionCount();
     }
 
-    /** Uploads Minecraft's block atlas (RGBA8, sRGB, row 0 = v 0). */
-    public void uploadAtlas(int width, int height, ByteBuffer rgba) {
+    /** Entity boxes (world-space AABBs, 6 doubles each) that cast shadows this frame. */
+    public void setShadowCasters(double[] aabbs, int count) {
+        scene.setShadowCasters(aabbs, count);
+    }
+
+    /**
+     * Uploads Minecraft's block atlas (RGBA8, sRGB, row 0 = v 0) with its mip chain: level i is
+     * {@code max(1, width >> i) x max(1, height >> i)}.
+     */
+    public void uploadAtlas(int width, int height, List<ByteBuffer> levels) {
         ctx.waitIdle();
-        GpuImage image = GpuImage.create(ctx, width, height, VK_FORMAT_R8G8B8A8_SRGB,
-                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        try (GpuBuffer staging = GpuBuffer.hostVisible(ctx, (long) width * height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
-            MemoryUtil.memCopy(MemoryUtil.memAddress(rgba), staging.mappedAddress(), (long) width * height * 4);
+        int mipLevels = levels.size();
+        GpuImage image = GpuImage.createMipmapped(ctx, width, height, VK_FORMAT_R8G8B8A8_SRGB,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, mipLevels);
+        long total = 0;
+        for (int i = 0; i < mipLevels; i++) total += levelBytes(width, height, i);
+        try (GpuBuffer staging = GpuBuffer.hostVisible(ctx, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            long[] offsets = new long[mipLevels];
+            long offset = 0;
+            for (int i = 0; i < mipLevels; i++) {
+                offsets[i] = offset;
+                MemoryUtil.memCopy(MemoryUtil.memAddress(levels.get(i)), staging.mappedAddress() + offset, levelBytes(width, height, i));
+                offset += levelBytes(width, height, i);
+            }
             staging.flush();
             Commands.immediate(ctx, c -> {
-                Barriers.transition(c, image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+                Barriers.transition(c, image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, mipLevels);
                 try (MemoryStack stack = stackPush()) {
-                    VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack)
-                            .imageSubresource(s -> s.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1))
-                            .imageExtent(e -> e.set(width, height, 1));
-                    vkCmdCopyBufferToImage(c, staging.handle, image.image, VK_IMAGE_LAYOUT_GENERAL, region);
+                    VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(mipLevels, stack);
+                    for (int i = 0; i < mipLevels; i++) {
+                        int level = i;
+                        regions.get(i)
+                                .bufferOffset(offsets[i])
+                                .imageSubresource(s -> s.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(level).layerCount(1))
+                                .imageExtent(e -> e.set(Math.max(1, width >> level), Math.max(1, height >> level), 1));
+                    }
+                    vkCmdCopyBufferToImage(c, staging.handle, image.image, VK_IMAGE_LAYOUT_GENERAL, regions);
                 }
                 Barriers.full(c);
             });
         }
         if (atlas != null) atlas.close();
+        if (atlasSampler != VK_NULL_HANDLE) vkDestroySampler(ctx.device, atlasSampler, null);
         atlas = image;
-        Descriptors.sampledImage(ctx, rtSet, BINDING_ATLAS, atlas, nearestSampler);
+        atlasSampler = Descriptors.sampler(ctx, VK_FILTER_NEAREST, mipLevels - 1);
+        Descriptors.sampledImage(ctx, rtSet, BINDING_ATLAS, atlas, atlasSampler);
+    }
+
+    private static long levelBytes(int width, int height, int level) {
+        return (long) Math.max(1, width >> level) * Math.max(1, height >> level) * 4;
     }
 
     // ---------------------------------------------------------------- targets
@@ -215,6 +276,14 @@ public final class HeliosRenderer implements AutoCloseable {
         return renderH;
     }
 
+    public GpuTimings gpuTimings() {
+        return timings;
+    }
+
+    public boolean usesGpuSync() {
+        return vulkanDone != null;
+    }
+
     /** True if {@link #resize} must be called (and the shared images re-imported) before the next frame. */
     public boolean needsResize(int displayWidth, int displayHeight) {
         return output == null || displayWidth != displayW || displayHeight != displayH
@@ -223,6 +292,7 @@ public final class HeliosRenderer implements AutoCloseable {
 
     /** Recreates all render targets. Returns fresh handles; previously exported images become invalid. */
     public SharedTargets resize(int displayWidth, int displayHeight) {
+        waitForPreviousFrame();
         ctx.waitIdle();
         destroyTargets();
         displayW = displayWidth;
@@ -237,11 +307,13 @@ public final class HeliosRenderer implements AutoCloseable {
         renderW = size != null && size[0] > 0 ? size[0] : activeQuality.renderWidth(displayW);
         renderH = size != null && size[1] > 0 ? size[1] : activeQuality.renderHeight(displayH);
 
-        illumination = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
+        indirect = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
+        direct = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
+        specular = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         albedo = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         normalDepth = image(renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT);
         prevNormalDepth = image(renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT);
-        motion = image(renderW, renderH, VK_FORMAT_R16G16_SFLOAT);
+        motion = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         depth = GpuImage.createExportable(ctx, renderW, renderH, VK_FORMAT_R32_SFLOAT, USAGE_STORAGE);
         history[0] = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         history[1] = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -281,27 +353,60 @@ public final class HeliosRenderer implements AutoCloseable {
                 win32);
     }
 
+    /**
+     * Creates the GL interop semaphores (once). Returns null if the device cannot export
+     * semaphores; frames are then synchronized with CPU waits.
+     */
+    public SharedSemaphores exportSemaphores() {
+        if (!ctx.externalSemaphores) return null;
+        if (vulkanDone == null) {
+            vulkanDone = new SharedSemaphore(ctx);
+            glDone = new SharedSemaphore(ctx);
+        }
+        return new SharedSemaphores(vulkanDone.export(), glDone.export(),
+                ctx.externalHandleType == VulkanContext.ExternalHandleType.OPAQUE_WIN32);
+    }
+
+    /** Stops using the interop semaphores (e.g. GL could not import them). */
+    public void disableGpuSync() {
+        ctx.waitIdle();
+        if (vulkanDone != null) {
+            vulkanDone.close();
+            glDone.close();
+            vulkanDone = glDone = null;
+        }
+        glSignaled = false;
+    }
+
+    /** Called after OpenGL signalled {@code glDone}: the next frame waits for it on the GPU. */
+    public void markGlSignaled() {
+        glSignaled = true;
+    }
+
     private GpuImage image(int w, int h, int format) {
         return GpuImage.create(ctx, w, h, format, USAGE_STORAGE);
     }
 
     private List<GpuImage> allTargets() {
-        List<GpuImage> list = new ArrayList<>(List.of(illumination, albedo, normalDepth, prevNormalDepth, motion, depth,
-                history[0], history[1], atrousA, atrousB, denoised, taauHistory[0], taauHistory[1], dlssOutput, output));
+        List<GpuImage> list = new ArrayList<>(List.of(indirect, direct, specular, albedo, normalDepth, prevNormalDepth,
+                motion, depth, history[0], history[1], atrousA, atrousB, denoised, taauHistory[0], taauHistory[1],
+                dlssOutput, output));
         list.removeIf(java.util.Objects::isNull);
         return list;
     }
 
     private void writeTargetDescriptors() {
-        Descriptors.storageImage(ctx, rtSet, BINDING_OUT_ILLUMINATION, illumination);
+        Descriptors.storageImage(ctx, rtSet, BINDING_OUT_INDIRECT, indirect);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_ALBEDO, albedo);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_NORMAL_DEPTH, normalDepth);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_MOTION, motion);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_DEPTH, depth);
+        Descriptors.storageImage(ctx, rtSet, BINDING_OUT_DIRECT, direct);
+        Descriptors.storageImage(ctx, rtSet, BINDING_OUT_SPECULAR, specular);
 
         for (int p = 0; p < 2; p++) {
             long set = temporal.set(p);
-            Descriptors.storageImage(ctx, set, 0, illumination);
+            Descriptors.storageImage(ctx, set, 0, indirect);
             Descriptors.storageImage(ctx, set, 1, normalDepth);
             Descriptors.storageImage(ctx, set, 2, motion);
             Descriptors.storageImage(ctx, set, 3, prevNormalDepth);
@@ -318,12 +423,14 @@ public final class HeliosRenderer implements AutoCloseable {
             Descriptors.storageImage(ctx, set, 2, atrousIo[i][1]);
         }
 
-        GpuImage[] modulateInputs = {atrousA, atrousB, history[0], history[1], illumination};
+        GpuImage[] modulateInputs = {atrousA, atrousB, history[0], history[1], indirect};
         for (int i = 0; i < modulateInputs.length; i++) {
             long set = modulate.set(i);
             Descriptors.storageImage(ctx, set, 0, modulateInputs[i]);
             Descriptors.storageImage(ctx, set, 1, albedo);
             Descriptors.storageImage(ctx, set, 2, denoised);
+            Descriptors.storageImage(ctx, set, 3, direct);
+            Descriptors.storageImage(ctx, set, 4, specular);
         }
 
         for (int p = 0; p < 2; p++) {
@@ -344,23 +451,41 @@ public final class HeliosRenderer implements AutoCloseable {
 
     // ------------------------------------------------------------------ frame
 
+    /**
+     * Blocks until the previous frame has finished on the GPU. Call before changing scene content
+     * (section uploads/removals, shadow casters); {@link #renderFrame} calls it too.
+     */
+    public void waitForPreviousFrame() {
+        if (!frameInFlight) return;
+        Commands.waitAndReset(ctx, fence);
+        frameInFlight = false;
+        readTimings();
+    }
+
     public void renderFrame(FrameInput in) {
         if (output == null) throw new IllegalStateException("resize() must be called before renderFrame()");
+        waitForPreviousFrame();
 
         uniforms.update(in.cameraX(), in.cameraY(), in.cameraZ(), in.viewRotation(), in.projection());
         float[] jitter = Jitter.offset(frameIndex, Jitter.phaseCount(renderW, displayW));
+        int flags = (resetHistory ? FrameUniforms.FLAG_ACCUMULATE_RESET : 0)
+                | (in.cameraUnderwater() ? FrameUniforms.FLAG_CAMERA_UNDERWATER : 0);
         uniforms.write(frameUbo.mapped(), jitter, renderW, renderH, in.lightDirection(), in.lightIntensity(),
                 in.skyColor(), in.rain(), (int) frameIndex, settings.maxBounces, Math.max(1, settings.samplesPerPixel),
-                resetHistory ? FrameUniforms.FLAG_ACCUMULATE_RESET : 0);
+                flags, FrameUniforms.pixelAngle(in.projection(), renderH));
         frameUbo.flush();
 
         Commands.begin(cmd);
+        vkCmdResetQueryPool(cmd, queryPool, 0, TIMESTAMPS);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
+
         scene.record(cmd, uniforms.anchorX(), uniforms.anchorY(), uniforms.anchorZ());
         Descriptors.accelerationStructure(ctx, rtSet, BINDING_TLAS, scene.tlas());
         Descriptors.buffer(ctx, rtSet, BINDING_GEOMETRY_TABLE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, scene.geometryTable());
 
         rtPipeline.trace(cmd, rtSet, renderW, renderH);
         Barriers.full(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
 
         int modulateSet = MOD_FROM_RAW;
         if (settings.denoiser) {
@@ -379,6 +504,7 @@ public final class HeliosRenderer implements AutoCloseable {
         modulate.dispatch(cmd, modulateSet, push().putInt(renderW).putInt(renderH).putInt(0).putInt(0).flip(),
                 renderW, renderH);
         Barriers.full(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 2);
 
         int tonemapSet;
         if (activeBackend == UpscalerBackend.DLSS) {
@@ -398,11 +524,34 @@ public final class HeliosRenderer implements AutoCloseable {
                 displayW, displayH);
         copyImage(normalDepth, prevNormalDepth);
         Barriers.full(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 3);
 
-        Commands.submitAndWait(ctx, cmd, fence);
+        if (vulkanDone != null) {
+            Commands.submit(ctx, cmd, fence, glSignaled ? glDone.handle : VK_NULL_HANDLE, vulkanDone.handle);
+            glSignaled = false;
+            frameInFlight = true;
+        } else {
+            // No GPU-side interop: GL may only read the shared images once Vulkan is done.
+            Commands.submit(ctx, cmd, fence, VK_NULL_HANDLE, VK_NULL_HANDLE);
+            frameInFlight = true;
+            waitForPreviousFrame();
+        }
         parity ^= 1;
         frameIndex++;
         resetHistory = false;
+    }
+
+    private void readTimings() {
+        if (ctx.timestampPeriod <= 0f) return;
+        try (MemoryStack stack = stackPush()) {
+            LongBuffer ts = stack.mallocLong(TIMESTAMPS);
+            if (vkGetQueryPoolResults(ctx.device, queryPool, 0, TIMESTAMPS, ts, 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+                return;
+            }
+            float ms = ctx.timestampPeriod / 1.0e6f;
+            timings = new GpuTimings((ts.get(1) - ts.get(0)) * ms, (ts.get(2) - ts.get(1)) * ms,
+                    (ts.get(3) - ts.get(2)) * ms, (ts.get(3) - ts.get(0)) * ms);
+        }
     }
 
     private ByteBuffer push() {
@@ -422,7 +571,7 @@ public final class HeliosRenderer implements AutoCloseable {
     private void destroyTargets() {
         if (output == null) return;
         allTargets().forEach(GpuImage::close);
-        illumination = albedo = normalDepth = prevNormalDepth = motion = depth = null;
+        indirect = direct = specular = albedo = normalDepth = prevNormalDepth = motion = depth = null;
         atrousA = atrousB = denoised = dlssOutput = output = null;
         history[0] = history[1] = taauHistory[0] = taauHistory[1] = null;
     }
@@ -441,8 +590,13 @@ public final class HeliosRenderer implements AutoCloseable {
         tonemap.close();
         rtPipeline.close();
         frameUbo.close();
-        vkDestroySampler(ctx.device, nearestSampler, null);
+        if (vulkanDone != null) {
+            vulkanDone.close();
+            glDone.close();
+        }
         vkDestroySampler(ctx.device, linearSampler, null);
+        if (atlasSampler != VK_NULL_HANDLE) vkDestroySampler(ctx.device, atlasSampler, null);
+        vkDestroyQueryPool(ctx.device, queryPool, null);
         vkDestroyDescriptorPool(ctx.device, descriptorPool, null);
         vkDestroyFence(ctx.device, fence, null);
         MemoryUtil.memFree(push);

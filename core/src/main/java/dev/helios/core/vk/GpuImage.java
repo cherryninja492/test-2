@@ -22,14 +22,16 @@ public final class GpuImage implements AutoCloseable {
     public final int format;
     public final int width;
     public final int height;
+    public final int mipLevels;
 
     private final VulkanContext ctx;
     private final long vmaAllocation;
     private final long exportMemory;
     public final long exportSize;
 
-    private GpuImage(VulkanContext ctx, int width, int height, int format, int usage, boolean exportable) {
+    private GpuImage(VulkanContext ctx, int width, int height, int format, int usage, boolean exportable, int mipLevels) {
         this.ctx = ctx;
+        this.mipLevels = mipLevels;
         this.width = width;
         this.height = height;
         this.format = format;
@@ -38,7 +40,7 @@ public final class GpuImage implements AutoCloseable {
                     .imageType(VK_IMAGE_TYPE_2D)
                     .format(format)
                     .extent(e -> e.set(width, height, 1))
-                    .mipLevels(1)
+                    .mipLevels(mipLevels)
                     .arrayLayers(1)
                     .samples(VK_SAMPLE_COUNT_1_BIT)
                     .tiling(VK_IMAGE_TILING_OPTIMAL)
@@ -84,7 +86,7 @@ public final class GpuImage implements AutoCloseable {
                     .image(image)
                     .viewType(VK_IMAGE_VIEW_TYPE_2D)
                     .format(format)
-                    .subresourceRange(Barriers.colorRange(stack));
+                    .subresourceRange(Barriers.colorRange(stack).levelCount(mipLevels));
             var pView = stack.mallocLong(1);
             check(vkCreateImageView(ctx.device, viewInfo, null, pView), "vkCreateImageView");
             view = pView.get(0);
@@ -92,11 +94,15 @@ public final class GpuImage implements AutoCloseable {
     }
 
     public static GpuImage create(VulkanContext ctx, int width, int height, int format, int usage) {
-        return new GpuImage(ctx, width, height, format, usage, false);
+        return new GpuImage(ctx, width, height, format, usage, false, 1);
+    }
+
+    public static GpuImage createMipmapped(VulkanContext ctx, int width, int height, int format, int usage, int mipLevels) {
+        return new GpuImage(ctx, width, height, format, usage, false, mipLevels);
     }
 
     public static GpuImage createExportable(VulkanContext ctx, int width, int height, int format, int usage) {
-        return new GpuImage(ctx, width, height, format, usage, true);
+        return new GpuImage(ctx, width, height, format, usage, true, 1);
     }
 
     /**

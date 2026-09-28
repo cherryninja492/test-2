@@ -4,6 +4,7 @@ import dev.helios.core.FrameInput;
 import dev.helios.core.HeliosRenderer;
 import dev.helios.core.geometry.SectionGeometry;
 import dev.helios.core.math.Lighting;
+import dev.helios.core.rt.SceneAccel;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -11,6 +12,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.material.FogType;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -18,7 +23,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Glue between Minecraft's render loop and {@link HeliosRenderer}. Called from
@@ -37,6 +44,8 @@ public final class HeliosPipeline {
     private int rendererGeneration = -1;
     private boolean atlasDirty = true;
     private final SectionMesher mesher = new SectionMesher();
+    private final double[] shadowBoxes = new double[SceneAccel.MAX_SHADOW_BOXES * 6];
+    private static final double SHADOW_CASTER_RANGE = 96.0;
 
     // Captured at the start of LevelRenderer#renderLevel.
     private final Matrix4f viewRotation = new Matrix4f();
@@ -121,6 +130,7 @@ public final class HeliosPipeline {
         Path natives = configDir.resolve("natives");
         renderer = new HeliosRenderer(config.renderer, GlComposite.deviceUuid(), configDir, List.of(natives, configDir));
         composite = new GlComposite();
+        composite.importSemaphores(renderer);
         atlasDirty = true;
         rendererGeneration = -1;
     }
@@ -140,17 +150,13 @@ public final class HeliosPipeline {
             atlasDirty = false;
         }
 
-        // The previous frame's composite must be done reading before Vulkan writes again.
+        // Without GPU-side sync, the previous composite must be done reading before Vulkan writes again.
         composite.waitForGl();
 
         Vec3 cam = camera.getPosition();
-        for (long section : tracker.poll(config.sectionsPerFrame,
-                SectionPos.blockToSectionCoord(cam.x), SectionPos.blockToSectionCoord(cam.y),
-                SectionPos.blockToSectionCoord(cam.z))) {
-            int sx = SectionPos.x(section), sy = SectionPos.y(section), sz = SectionPos.z(section);
-            SectionGeometry geometry = mesher.mesh(level, sx, sy, sz);
-            renderer.uploadSection(sx, sy, sz, geometry);
-        }
+        meshSections(level, cam);
+        if (config.entityShadows) collectShadowCasters(level, cam);
+        else renderer.setShadowCasters(shadowBoxes, 0);
 
         int width = mc.getMainRenderTarget().width;
         int height = mc.getMainRenderTarget().height;
@@ -164,9 +170,81 @@ public final class HeliosPipeline {
         Vec3 sky = level.getSkyColor(cam, partialTick);
         Vector3f skyLinear = new Vector3f((float) Math.pow(sky.x, 2.2), (float) Math.pow(sky.y, 2.2), (float) Math.pow(sky.z, 2.2));
 
+        boolean underwater = camera.getFluidInCamera() == FogType.WATER;
         renderer.renderFrame(new FrameInput(cam.x, cam.y, cam.z, viewRotation, projection,
-                lightDir, lightIntensity, skyLinear, rain));
-        composite.draw();
+                lightDir, lightIntensity, skyLinear, rain, underwater));
+        composite.draw(renderer);
+    }
+
+    /** Meshes dirty sections, closest first, within the per-frame time budget. */
+    private void meshSections(ClientLevel level, Vec3 cam) {
+        long deadline = System.nanoTime() + (long) (config.meshBudgetMs * 1_000_000L);
+        int camSx = SectionPos.blockToSectionCoord(cam.x);
+        int camSy = SectionPos.blockToSectionCoord(cam.y);
+        int camSz = SectionPos.blockToSectionCoord(cam.z);
+        int meshed = 0;
+        while (meshed < config.sectionsPerFrame) {
+            long[] batch = tracker.poll(Math.min(4, config.sectionsPerFrame - meshed), camSx, camSy, camSz);
+            if (batch.length == 0) break;
+            for (long section : batch) {
+                int sx = SectionPos.x(section), sy = SectionPos.y(section), sz = SectionPos.z(section);
+                if (meshed > 0 && System.nanoTime() > deadline) {
+                    tracker.markDirty(sx, sy, sz); // over budget: retry next frame
+                    continue;
+                }
+                renderer.uploadSection(sx, sy, sz, mesher.mesh(level, sx, sy, sz));
+                meshed++;
+            }
+            if (System.nanoTime() > deadline) break;
+        }
+    }
+
+    /** Entity bounding boxes near the camera (including the player) become shadow-only proxies. */
+    private void collectShadowCasters(ClientLevel level, Vec3 cam) {
+        int count = 0;
+        for (Entity entity : level.entitiesForRendering()) {
+            if (!(entity instanceof LivingEntity) || entity.isInvisible()) continue;
+            Vec3 pos = entity.getPosition(partialTick);
+            if (pos.distanceToSqr(cam) > SHADOW_CASTER_RANGE * SHADOW_CASTER_RANGE) continue;
+            AABB box = entity.getBoundingBox().move(pos.subtract(entity.position()));
+            // Slightly slimmer than the hitbox so the blocky proxy reads more like the model.
+            double insetX = box.getXsize() * 0.15, insetZ = box.getZsize() * 0.15;
+            int o = count * 6;
+            shadowBoxes[o] = box.minX + insetX;
+            shadowBoxes[o + 1] = box.minY;
+            shadowBoxes[o + 2] = box.minZ + insetZ;
+            shadowBoxes[o + 3] = box.maxX - insetX;
+            shadowBoxes[o + 4] = box.maxY;
+            shadowBoxes[o + 5] = box.maxZ - insetZ;
+            if (++count == SceneAccel.MAX_SHADOW_BOXES) break;
+        }
+        renderer.setShadowCasters(shadowBoxes, count);
+    }
+
+    /** Lines for the F3 debug screen. */
+    public List<String> debugLines() {
+        List<String> lines = new ArrayList<>();
+        if (config == null || !config.enabled) {
+            lines.add("[Helios] disabled (F9)");
+            return lines;
+        }
+        if (failure != null) {
+            lines.add("[Helios] failed: " + failure);
+            return lines;
+        }
+        HeliosRenderer r = renderer;
+        if (r == null) {
+            lines.add("[Helios] starting");
+            return lines;
+        }
+        HeliosRenderer.GpuTimings t = r.gpuTimings();
+        lines.add(String.format(Locale.ROOT, "[Helios] %s, %s %dx%d, %s sync",
+                r.deviceName(), r.activeBackend(), r.renderWidth(), r.renderHeight(), r.usesGpuSync() ? "GPU" : "CPU"));
+        lines.add(String.format(Locale.ROOT, "[Helios] GPU %.2f ms (trace %.2f, denoise %.2f, upscale %.2f)",
+                t.total(), t.accelerationAndTrace(), t.denoise(), t.upscaleAndTonemap()));
+        lines.add(String.format(Locale.ROOT, "[Helios] sections %d, pending %d, bounces %d",
+                r.sectionCount(), tracker.pendingCount(), config.renderer.maxBounces));
+        return lines;
     }
 
     private void fail(Throwable t) {

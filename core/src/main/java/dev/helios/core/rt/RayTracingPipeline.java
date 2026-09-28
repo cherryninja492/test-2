@@ -26,11 +26,13 @@ public final class RayTracingPipeline implements AutoCloseable {
     public static final int BINDING_FRAME = 1;
     public static final int BINDING_GEOMETRY_TABLE = 2;
     public static final int BINDING_ATLAS = 3;
-    public static final int BINDING_OUT_ILLUMINATION = 4;
+    public static final int BINDING_OUT_INDIRECT = 4;
     public static final int BINDING_OUT_ALBEDO = 5;
     public static final int BINDING_OUT_NORMAL_DEPTH = 6;
     public static final int BINDING_OUT_MOTION = 7;
     public static final int BINDING_OUT_DEPTH = 8;
+    public static final int BINDING_OUT_DIRECT = 9;
+    public static final int BINDING_OUT_SPECULAR = 10;
 
     private static final int STAGES = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
             | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
@@ -50,6 +52,8 @@ public final class RayTracingPipeline implements AutoCloseable {
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,

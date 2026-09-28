@@ -55,6 +55,10 @@ public final class VulkanContext implements AutoCloseable {
     public final String deviceName;
     public final RayTracingProperties rtProperties;
     public final ExternalHandleType externalHandleType;
+    /** True if semaphores can be shared with OpenGL (GPU-side sync instead of CPU waits). */
+    public final boolean externalSemaphores;
+    /** Nanoseconds per timestamp tick; 0 if the queue has no timestamps. */
+    public final float timestampPeriod;
     private final long debugMessenger;
 
     private static final List<String> REQUIRED_DEVICE_EXTENSIONS = List.of(
@@ -84,11 +88,17 @@ public final class VulkanContext implements AutoCloseable {
             VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.malloc(stack);
             vkGetPhysicalDeviceProperties(physicalDevice, props);
             deviceName = props.deviceNameString();
+            timestampPeriod = props.limits().timestampPeriod();
 
             queueFamily = findQueueFamily(stack, physicalDevice);
 
             Set<String> available = deviceExtensions(stack, physicalDevice);
             List<String> enabled = new ArrayList<>(required);
+            String semaphoreExt = externalHandleType == ExternalHandleType.OPAQUE_WIN32
+                    ? KHRExternalSemaphoreWin32.VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME
+                    : KHRExternalSemaphoreFd.VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
+            externalSemaphores = available.contains(semaphoreExt);
+            if (externalSemaphores) enabled.add(semaphoreExt);
             for (String ext : extraDeviceExts) {
                 if (available.contains(ext) && !enabled.contains(ext)) enabled.add(ext);
             }

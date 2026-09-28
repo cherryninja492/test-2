@@ -15,6 +15,13 @@ import static org.lwjgl.opengl.EXTMemoryObjectFD.GL_HANDLE_TYPE_OPAQUE_FD_EXT;
 import static org.lwjgl.opengl.EXTMemoryObjectFD.glImportMemoryFdEXT;
 import static org.lwjgl.opengl.EXTMemoryObjectWin32.GL_HANDLE_TYPE_OPAQUE_WIN32_EXT;
 import static org.lwjgl.opengl.EXTMemoryObjectWin32.glImportMemoryWin32HandleEXT;
+import static org.lwjgl.opengl.EXTSemaphore.GL_LAYOUT_GENERAL_EXT;
+import static org.lwjgl.opengl.EXTSemaphore.glDeleteSemaphoresEXT;
+import static org.lwjgl.opengl.EXTSemaphore.glGenSemaphoresEXT;
+import static org.lwjgl.opengl.EXTSemaphore.glSignalSemaphoreEXT;
+import static org.lwjgl.opengl.EXTSemaphore.glWaitSemaphoreEXT;
+import static org.lwjgl.opengl.EXTSemaphoreFD.glImportSemaphoreFdEXT;
+import static org.lwjgl.opengl.EXTSemaphoreWin32.glImportSemaphoreWin32HandleEXT;
 import static org.lwjgl.opengl.GL32C.*;
 
 /**
@@ -51,6 +58,8 @@ final class GlComposite implements AutoCloseable {
     private final int vao;
     private int colorTexture, depthTexture, colorMemory, depthMemory;
     private long pendingSync;
+    // GPU-side sync with Vulkan (GL_EXT_semaphore); 0 when unavailable.
+    private int vulkanDone, glDone;
 
     GlComposite() {
         GLCapabilities caps = GL.getCapabilities();
@@ -76,6 +85,34 @@ final class GlComposite implements AutoCloseable {
             uuid.get(out);
             return out;
         }
+    }
+
+    /**
+     * Imports the renderer's interop semaphores if GL supports {@code GL_EXT_semaphore}; otherwise
+     * tells the renderer to fall back to CPU synchronization.
+     */
+    void importSemaphores(HeliosRenderer renderer) {
+        GLCapabilities caps = GL.getCapabilities();
+        boolean win32 = caps.GL_EXT_semaphore_win32;
+        if (!caps.GL_EXT_semaphore || !(caps.GL_EXT_semaphore_fd || win32)) {
+            renderer.disableGpuSync();
+            return;
+        }
+        HeliosRenderer.SharedSemaphores semaphores = renderer.exportSemaphores();
+        if (semaphores == null) return;
+        vulkanDone = importSemaphore(semaphores.vulkanDone(), semaphores.win32Handles());
+        glDone = importSemaphore(semaphores.glDone(), semaphores.win32Handles());
+    }
+
+    private static int importSemaphore(long handle, boolean win32) {
+        int semaphore = glGenSemaphoresEXT();
+        if (win32) {
+            glImportSemaphoreWin32HandleEXT(semaphore, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+            ExternalHandles.closeWin32Handle(handle);
+        } else {
+            glImportSemaphoreFdEXT(semaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, (int) handle);
+        }
+        return semaphore;
     }
 
     void importTargets(HeliosRenderer.SharedTargets targets) {
@@ -112,7 +149,11 @@ final class GlComposite implements AutoCloseable {
     }
 
     /** Draws the ray traced frame into the currently bound framebuffer (colour + depth). */
-    void draw() {
+    void draw(HeliosRenderer renderer) {
+        int[] textures = {colorTexture, depthTexture};
+        int[] layouts = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
+        if (vulkanDone != 0) glWaitSemaphoreEXT(vulkanDone, new int[0], textures, layouts);
+
         int previousProgram = glGetInteger(GL_CURRENT_PROGRAM);
         int previousVao = glGetInteger(GL_VERTEX_ARRAY_BINDING);
 
@@ -139,12 +180,18 @@ final class GlComposite implements AutoCloseable {
         GlStateManager._glBindVertexArray(previousVao);
         GlStateManager._glUseProgram(previousProgram);
 
-        pendingSync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (glDone != 0) {
+            glSignalSemaphoreEXT(glDone, new int[0], textures, layouts);
+            glFlush();
+            renderer.markGlSignaled();
+        } else {
+            pendingSync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        }
     }
 
     /**
-     * Blocks until OpenGL has finished reading the shared images, so Vulkan may overwrite them.
-     * (Without imported semaphores this CPU wait is the synchronization point.)
+     * Without semaphores: blocks until OpenGL has finished reading the shared images, so Vulkan may
+     * overwrite them. No-op with semaphores (the GPU orders the work).
      */
     void waitForGl() {
         if (pendingSync != 0L) {
@@ -191,6 +238,11 @@ final class GlComposite implements AutoCloseable {
     @Override
     public void close() {
         releaseTextures();
+        if (vulkanDone != 0) {
+            glDeleteSemaphoresEXT(vulkanDone);
+            glDeleteSemaphoresEXT(glDone);
+            vulkanDone = glDone = 0;
+        }
         glDeleteVertexArrays(vao);
         glDeleteProgram(program);
     }

@@ -2,37 +2,46 @@
 #extension GL_EXT_ray_tracing : require
 #include "raytracing.glsl"
 
-// Primary visibility + diffuse path tracing with next-event estimation towards the sun/moon.
-// Writes demodulated illumination (radiance / primary albedo) so the denoiser does not blur textures.
+// Primary visibility (through water), then per pixel:
+//  - direct:   sun/moon light + emission at the primary surface, demodulated (not spatially filtered)
+//  - indirect: diffuse path traced bounces, demodulated (denoised)
+//  - specular: water reflection and in-water scattering, as radiance (added after modulation)
+// The G-buffer albedo carries the water transmittance so modulation darkens what is seen through it.
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
-layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outIllumination;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outIndirect;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outAlbedo;
 layout(set = 0, binding = 6, rgba32f) uniform writeonly image2D outNormalDepth;
-layout(set = 0, binding = 7, rg16f) uniform writeonly image2D outMotion;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D outMotion;   // xy motion (uv), z expected previous distance
 layout(set = 0, binding = 8, r32f) uniform writeonly image2D outDepth;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D outDirect;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D outSpecular;
 
 layout(location = 0) rayPayloadEXT SurfacePayload hit;
 layout(location = 1) rayPayloadEXT uint shadowMissed;
 
-const float FIREFLY_CLAMP = 32.0;
+const float FIREFLY_CLAMP = 16.0;
 
 bool traceSurface(vec3 origin, vec3 dir) {
     hit.t = -1.0;
-    traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 0, 0, origin, 0.0, dir, MAX_DISTANCE, 0);
+    traceRayEXT(tlas, gl_RayFlagsNoneEXT, MASK_WORLD, 0, 0, 0, origin, 0.0, dir, MAX_DISTANCE, 0);
     return hit.t >= 0.0;
 }
 
 bool unoccluded(vec3 origin, vec3 dir) {
     shadowMissed = 0u;
     traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                0xFF, 0, 0, 1, origin, 0.0, dir, MAX_DISTANCE, 1);
+                MASK_ALL, 0, 0, 1, origin, 0.0, dir, MAX_DISTANCE, 1);
     return shadowMissed != 0u;
 }
 
-// Irradiance-like term from the directional light, without the surface albedo.
+float lightIntensity() {
+    return frame.lightDir.w * (1.0 - 0.7 * frame.skyColor.w);
+}
+
+// Light from the sun/moon arriving at a diffuse surface, without its albedo.
 vec3 directLight(vec3 pos, vec3 n, inout uint rng) {
-    float intensity = frame.lightDir.w * (1.0 - 0.7 * frame.skyColor.w);
+    float intensity = lightIntensity();
     if (intensity <= 0.0) return vec3(0.0);
     vec3 l = sampleCone(frame.lightDir.xyz, SUN_ANGULAR_RADIUS, rand2(rng));
     float ndl = dot(n, l);
@@ -40,21 +49,26 @@ vec3 directLight(vec3 pos, vec3 n, inout uint rng) {
     return SUN_COLOR * (intensity * SUN_STRENGTH * ndl);
 }
 
-// Light arriving at a diffuse surface, divided by that surface's albedo.
-vec3 tracePath(vec3 pos, vec3 n, inout uint rng) {
-    vec3 radiance = directLight(pos, n, rng);
+vec3 ambientSky(vec3 dir) {
+    return skyRadiance(dir, false) * SKY_AMBIENT;
+}
+
+// Indirect (bounced) light arriving at a diffuse surface, without its albedo.
+vec3 traceIndirect(vec3 pos, vec3 n, inout uint rng) {
+    vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
     uint bounces = frame.frameInfo.y;
     for (uint b = 0u; b < bounces; b++) {
         vec3 origin = pos + n * RAY_EPSILON;
         vec3 dir = sampleCosineHemisphere(n, rand2(rng));
         if (!traceSurface(origin, dir)) {
-            radiance += throughput * skyRadiance(dir, false);
+            radiance += throughput * ambientSky(dir);
             break;
         }
         pos = origin + dir * hit.t;
         n = hit.normal;
         throughput *= hit.albedo;
+        if ((hit.material & MAT_WATER) != 0u) break; // treat water as a dark diffuse surface for GI
         radiance += throughput * (emissionOf(hit.material) + directLight(pos, n, rng));
         if (b >= 1u) {
             float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
@@ -65,15 +79,24 @@ vec3 tracePath(vec3 pos, vec3 n, inout uint rng) {
     return radiance;
 }
 
-// Single-bounce mirror reflection (water).
+// Single-bounce mirror reflection of the scene (water surfaces).
 vec3 traceReflection(vec3 origin, vec3 dir, inout uint rng) {
     if (!traceSurface(origin, dir)) return skyRadiance(dir, true);
     vec3 pos = origin + dir * hit.t;
     vec3 albedo = hit.albedo;
     vec3 n = hit.normal;
     uint material = hit.material;
-    vec3 ambient = skyRadiance(n, false) * 0.3;
-    return albedo * (emissionOf(material) + directLight(pos, n, rng) + ambient);
+    return albedo * (emissionOf(material) + directLight(pos, n, rng) + ambientSky(n));
+}
+
+vec3 waterTransmittance(float distance) {
+    return exp(-WATER_ABSORPTION * distance);
+}
+
+// Light scattered towards the camera inside a water segment (single-scattering approximation).
+vec3 waterInscatter(vec3 segmentTransmittance) {
+    vec3 light = SUN_COLOR * lightIntensity() * 0.6 + skyRadiance(vec3(0.0, 1.0, 0.0), false) * 0.5;
+    return WATER_SCATTER * light * (1.0 - segmentTransmittance) / WATER_ABSORPTION;
 }
 
 vec2 motionFromClip(vec4 prevClip, vec2 currentUv) {
@@ -81,6 +104,11 @@ vec2 motionFromClip(vec4 prevClip, vec2 currentUv) {
     vec2 prevNdc = prevClip.xy / prevClip.w;
     vec2 prevUv = vec2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
     return prevUv - currentUv;
+}
+
+float glDepthOf(vec3 pos) {
+    vec4 clip = frame.viewProj * vec4(pos, 1.0);
+    return clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
 }
 
 void main() {
@@ -92,46 +120,78 @@ void main() {
     ndc.y = -ndc.y;
     vec4 nearH = frame.invViewProj * vec4(ndc, -1.0, 1.0);
     vec4 farH = frame.invViewProj * vec4(ndc, 1.0, 1.0);
-    vec3 origin = frame.cameraPos.xyz;
     vec3 dir = normalize(farH.xyz / farH.w - nearH.xyz / nearH.w);
     vec2 centerUv = (vec2(pixel) + 0.5) / size;
 
-    if (!traceSurface(origin, dir)) {
-        imageStore(outIllumination, pixel, vec4(min(skyRadiance(dir, true), vec3(FIREFLY_CLAMP)), 1.0));
-        imageStore(outAlbedo, pixel, vec4(1.0));
+    // Walk through up to two water interfaces to the first solid surface.
+    bool inWater = (frame.frameInfo.w & FLAG_CAMERA_UNDERWATER) != 0u;
+    vec3 origin = frame.cameraPos.xyz;
+    vec3 transmittance = vec3(1.0);
+    vec3 specular = vec3(0.0);
+    float glDepth = -1.0;
+    bool solid = false;
+    for (int i = 0; i < 3; i++) {
+        bool found = traceSurface(origin, dir);
+        if (inWater) {
+            vec3 segment = waterTransmittance(found ? hit.t : 64.0);
+            specular += transmittance * waterInscatter(segment);
+            transmittance *= segment;
+        }
+        if (!found) break;
+        vec3 p = origin + dir * hit.t;
+        if ((hit.material & MAT_WATER) == 0u || i == 2) {
+            solid = true;
+            origin = p;
+            break;
+        }
+        vec3 n = hit.normal; // faces the incoming ray
+        if (glDepth < 0.0) glDepth = glDepthOf(p);
+        if (!inWater) {
+            float f = fresnelSchlick(max(dot(-dir, n), 0.0), 0.02);
+            specular += transmittance * f * traceReflection(p + n * RAY_EPSILON, reflect(dir, n), rng);
+            transmittance *= 1.0 - f;
+        }
+        inWater = !inWater;
+        origin = p - n * RAY_EPSILON; // continue on the other side of the surface
+    }
+
+    if (!solid) {
+        vec3 sky = inWater ? vec3(0.0) : skyRadiance(dir, true);
+        vec4 prevClip = frame.prevViewProj * vec4(dir, 0.0);
+        imageStore(outIndirect, pixel, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(outDirect, pixel, vec4(min(sky, vec3(FIREFLY_CLAMP * 4.0)), 1.0));
+        imageStore(outAlbedo, pixel, vec4(transmittance, 1.0));
+        imageStore(outSpecular, pixel, vec4(specular, 1.0));
         imageStore(outNormalDepth, pixel, vec4(0.0, 0.0, 0.0, SKY_DEPTH));
-        imageStore(outMotion, pixel, vec4(motionFromClip(frame.prevViewProj * vec4(dir, 0.0), centerUv), 0.0, 0.0));
-        imageStore(outDepth, pixel, vec4(1.0));
+        imageStore(outMotion, pixel, vec4(motionFromClip(prevClip, centerUv), 0.0, 0.0));
+        imageStore(outDepth, pixel, vec4(glDepth >= 0.0 ? glDepth : 1.0));
         return;
     }
 
-    vec3 pos = origin + dir * hit.t;
+    vec3 pos = origin;
     vec3 n = hit.normal;
     vec3 albedo = max(hit.albedo, vec3(1.0e-3));
     uint material = hit.material;
-    float distance = hit.t;
-
-    vec4 clip = frame.viewProj * vec4(pos, 1.0);
-    float depth = clamp(clip.z / clip.w * 0.5 + 0.5, 0.0, 1.0);
+    float distance = length(pos - frame.cameraPos.xyz);
+    if (glDepth < 0.0) glDepth = glDepthOf(pos);
     vec2 motion = motionFromClip(frame.prevViewProj * vec4(pos, 1.0), centerUv);
+    float expectedPrevDistance = length(pos - frame.prevCameraPos.xyz);
 
     uint spp = max(frame.frameInfo.z, 1u);
-    vec3 illumination = vec3(0.0);
+    vec3 indirect = vec3(0.0);
+    vec3 direct = vec3(0.0);
     for (uint s = 0u; s < spp; s++) {
-        illumination += tracePath(pos, n, rng);
+        direct += directLight(pos, n, rng);
+        indirect += traceIndirect(pos, n, rng);
     }
-    illumination /= float(spp);
-    illumination += emissionOf(material); // emission = albedo * k, demodulated to k
+    direct = direct / float(spp) + emissionOf(material); // emission = albedo * k, demodulated to k
+    indirect = min(indirect / float(spp), vec3(FIREFLY_CLAMP));
 
-    if ((material & MAT_WATER) != 0u) {
-        float f = fresnelSchlick(max(dot(-dir, n), 0.0), 0.02);
-        vec3 reflection = traceReflection(pos + n * RAY_EPSILON, reflect(dir, n), rng);
-        illumination = illumination * (1.0 - f) + reflection * f / albedo;
-    }
-
-    imageStore(outIllumination, pixel, vec4(min(illumination, vec3(FIREFLY_CLAMP)), 1.0));
-    imageStore(outAlbedo, pixel, vec4(albedo, 1.0));
+    imageStore(outIndirect, pixel, vec4(indirect, 1.0));
+    imageStore(outDirect, pixel, vec4(direct, 1.0));
+    imageStore(outAlbedo, pixel, vec4(albedo * transmittance, 1.0));
+    imageStore(outSpecular, pixel, vec4(specular, 1.0));
     imageStore(outNormalDepth, pixel, vec4(n, distance));
-    imageStore(outMotion, pixel, vec4(motion, 0.0, 0.0));
-    imageStore(outDepth, pixel, vec4(depth));
+    imageStore(outMotion, pixel, vec4(motion, expectedPrevDistance, 0.0));
+    imageStore(outDepth, pixel, vec4(glDepth));
 }

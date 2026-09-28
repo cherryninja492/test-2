@@ -36,6 +36,10 @@ public final class Barriers {
     }
 
     public static void transition(VkCommandBuffer cmd, long image, int oldLayout, int newLayout) {
+        transition(cmd, image, oldLayout, newLayout, 1);
+    }
+
+    public static void transition(VkCommandBuffer cmd, long image, int oldLayout, int newLayout, int mipLevels) {
         try (MemoryStack stack = stackPush()) {
             VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack).sType$Default()
                     .srcAccessMask(VK_ACCESS_MEMORY_WRITE_BIT)
@@ -45,7 +49,7 @@ public final class Barriers {
                     .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                     .dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                     .image(image)
-                    .subresourceRange(colorRange(stack));
+                    .subresourceRange(colorRange(stack).levelCount(mipLevels));
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     0, null, null, barrier);
         }

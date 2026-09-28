@@ -4,7 +4,8 @@
   "package": "dev.helios.fabric.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "LevelRendererMixin"
+    "LevelRendererMixin",
+    "DebugScreenOverlayMixin"
   ],
   "injectors": {
     "defaultRequire": 1
