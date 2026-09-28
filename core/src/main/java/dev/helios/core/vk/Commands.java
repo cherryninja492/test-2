@@ -7,7 +7,7 @@ import org.lwjgl.vulkan.*;
 import java.util.function.Consumer;
 
 import static dev.helios.core.vk.VkCheck.check;
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
 
 /** Command buffer allocation and synchronous submission. */

@@ -19,12 +19,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build mod
-        run: ./gradlew build --stacktrace
+        run: ./gradlew build --stacktrace -Pbuild_tag=${GITHUB_SHA::7}
+
+      - name: Name artifact after the jar
+        run: |
+          jar=$(ls fabric/build/libs/*.jar | grep -v -- -sources.jar)
+          echo "ARTIFACT=$(basename "$jar" .jar)" >> "$GITHUB_ENV"
 
       - name: Upload mod jar
         uses: actions/upload-artifact@v4
         with:
-          name: helios-mod
+          name: ${{ env.ARTIFACT }}
           path: |
             fabric/build/libs/*.jar
             !fabric/build/libs/*-sources.jar

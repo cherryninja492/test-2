@@ -3,6 +3,7 @@ package dev.helios.fabric;
 import com.mojang.blaze3d.platform.GlStateManager;
 import dev.helios.core.HeliosRenderer;
 import dev.helios.core.vk.ExternalHandles;
+import dev.helios.core.vk.HeliosStack;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GLCapabilities;
 import org.lwjgl.system.MemoryStack;
@@ -68,7 +69,7 @@ final class GlComposite implements AutoCloseable {
     /** {@code GL_DEVICE_UUID_EXT} of the GPU running this GL context, so Vulkan picks the same one. */
     static byte[] deviceUuid() {
         if (!GL.getCapabilities().GL_EXT_memory_object) return null;
-        try (MemoryStack stack = MemoryStack.stackPush()) {
+        try (MemoryStack stack = HeliosStack.stackPush()) {
             ByteBuffer uuid = stack.calloc(GL_UUID_SIZE_EXT);
             glGetUnsignedBytei_vEXT(GL_DEVICE_UUID_EXT, 0, uuid);
             byte[] out = new byte[GL_UUID_SIZE_EXT];

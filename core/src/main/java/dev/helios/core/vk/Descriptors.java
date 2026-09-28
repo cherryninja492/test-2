@@ -4,7 +4,7 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
 import static dev.helios.core.vk.VkCheck.check;
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 import static org.lwjgl.vulkan.VK10.*;
 

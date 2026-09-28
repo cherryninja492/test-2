@@ -11,7 +11,7 @@ import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
 import java.nio.ByteBuffer;
 
 import static dev.helios.core.vk.VkCheck.check;
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.util.vma.Vma.*;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;

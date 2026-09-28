@@ -35,8 +35,19 @@ public final class ShaderCompiler implements AutoCloseable {
 
     /** @return SPIR-V in a newly allocated direct buffer; free with {@link MemoryUtil#memFree}. */
     public ByteBuffer compile(String name) {
-        String source = load(name, new HashSet<>());
-        long result = shaderc_compile_into_spv(compiler, source, kindFor(name), name, "main", options);
+        // Encode on the heap: the CharSequence overload would copy the whole source onto LWJGL's
+        // small thread stack.
+        ByteBuffer source = MemoryUtil.memUTF8(load(name, new HashSet<>()), false);
+        ByteBuffer fileName = MemoryUtil.memUTF8(name);
+        ByteBuffer entryPoint = MemoryUtil.memUTF8("main");
+        long result;
+        try {
+            result = shaderc_compile_into_spv(compiler, source, kindFor(name), fileName, entryPoint, options);
+        } finally {
+            MemoryUtil.memFree(source);
+            MemoryUtil.memFree(fileName);
+            MemoryUtil.memFree(entryPoint);
+        }
         try {
             if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
                 throw new IllegalStateException("Failed to compile " + name + ":\n" + shaderc_result_get_error_message(result));

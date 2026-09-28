@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.logging.Logger;
 
 import static dev.helios.core.rt.RayTracingPipeline.*;
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
 
 /**

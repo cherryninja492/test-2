@@ -2,7 +2,8 @@ subprojects {
     apply plugin: 'java'
 
     group = project.maven_group
-    version = project.mod_version
+    // CI passes -Pbuild_tag=<commit> so every downloaded jar is distinguishable, e.g. helios-0.1.2+4e47616.jar
+    version = project.mod_version + (project.hasProperty('build_tag') ? "+${project.build_tag}" : '')
 
     java {
         toolchain.languageVersion = JavaLanguageVersion.of(21)

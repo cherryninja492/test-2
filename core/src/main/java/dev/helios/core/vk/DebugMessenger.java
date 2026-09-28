@@ -7,7 +7,7 @@ import org.lwjgl.vulkan.VkInstance;
 
 import java.util.logging.Logger;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
 import static org.lwjgl.vulkan.VK10.VK_FALSE;
 

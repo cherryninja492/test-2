@@ -7,7 +7,7 @@ import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
 import java.nio.ByteBuffer;
 
 import static dev.helios.core.vk.VkCheck.check;
-import static org.lwjgl.system.MemoryStack.stackPush;
+import static dev.helios.core.vk.HeliosStack.stackPush;
 import static org.lwjgl.vulkan.VK10.vkCreateShaderModule;
 
 public final class Shaders {

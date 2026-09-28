@@ -171,13 +171,24 @@ public final class HeliosPipeline {
 
     private void fail(Throwable t) {
         LOG.error("Helios ray tracing failed; falling back to vanilla rendering", t);
-        failure = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+        failure = describe(t);
         frameActive = false;
         shutdown();
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null) {
             mc.player.displayClientMessage(Component.translatable("helios.message.failed", failure), false);
         }
+    }
+
+    /** Message plus the innermost Helios frame, e.g. "Out of stack space. (VulkanContext.java:190)". */
+    private static String describe(Throwable t) {
+        String message = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+        for (StackTraceElement e : t.getStackTrace()) {
+            if (e.getClassName().startsWith("dev.helios.")) {
+                return message + " (" + e.getFileName() + ":" + e.getLineNumber() + ")";
+            }
+        }
+        return message;
     }
 
     public void shutdown() {
