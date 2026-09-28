@@ -98,6 +98,10 @@ public final class HeliosRenderer implements AutoCloseable {
     private GpuTimings timings = new GpuTimings(0, 0, 0, 0);
 
     private GpuImage atlas;
+    private record AtlasRegion(int level, int x, int y, int width, int height, int[] rgba) {
+    }
+    private final List<AtlasRegion> pendingAtlasRegions = new ArrayList<>();
+    private GpuBuffer atlasStaging;
 
     // Render resolution
     private GpuImage indirect, direct, specular, albedo, normalDepth, prevNormalDepth, motion, depth;
@@ -248,9 +252,55 @@ public final class HeliosRenderer implements AutoCloseable {
         }
         if (atlas != null) atlas.close();
         if (atlasSampler != VK_NULL_HANDLE) vkDestroySampler(ctx.device, atlasSampler, null);
+        pendingAtlasRegions.clear();
         atlas = image;
         atlasSampler = Descriptors.sampler(ctx, VK_FILTER_NEAREST, mipLevels - 1);
         Descriptors.sampledImage(ctx, rtSet, BINDING_ATLAS, atlas, atlasSampler);
+    }
+
+    /**
+     * Queues an update of part of the atlas (animated textures: water, lava, fire...). Pixels are
+     * RGBA8 packed as Minecraft's NativeImage ints (R in the low byte). Applied in the next frame.
+     */
+    public void updateAtlasRegion(int level, int x, int y, int width, int height, int[] rgba) {
+        if (atlas == null || level >= atlas.mipLevels) return;
+        int lw = Math.max(1, atlas.width >> level), lh = Math.max(1, atlas.height >> level);
+        if (x < 0 || y < 0 || x + width > lw || y + height > lh) return;
+        pendingAtlasRegions.add(new AtlasRegion(level, x, y, width, height, rgba));
+    }
+
+    /** Drops queued region updates (e.g. the whole atlas is being re-uploaded). */
+    public void clearAtlasRegionUpdates() {
+        pendingAtlasRegions.clear();
+    }
+
+    private void recordAtlasRegionUpdates() {
+        if (pendingAtlasRegions.isEmpty()) return;
+        long bytes = 0;
+        for (AtlasRegion r : pendingAtlasRegions) bytes += (long) r.width * r.height * 4;
+        if (atlasStaging == null || atlasStaging.size < bytes) {
+            if (atlasStaging != null) atlasStaging.close(); // the previous frame has completed
+            atlasStaging = GpuBuffer.hostVisible(ctx, Math.max(bytes, 1 << 16), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        }
+        java.nio.IntBuffer dst = atlasStaging.mapped().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        try (MemoryStack stack = stackPush()) {
+            VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(pendingAtlasRegions.size(), stack);
+            long offset = 0;
+            for (int i = 0; i < pendingAtlasRegions.size(); i++) {
+                AtlasRegion r = pendingAtlasRegions.get(i);
+                dst.put(r.rgba, 0, r.width * r.height);
+                regions.get(i)
+                        .bufferOffset(offset)
+                        .imageSubresource(sub -> sub.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(r.level).layerCount(1))
+                        .imageOffset(o -> o.set(r.x, r.y, 0))
+                        .imageExtent(e -> e.set(r.width, r.height, 1));
+                offset += (long) r.width * r.height * 4;
+            }
+            atlasStaging.flush();
+            vkCmdCopyBufferToImage(cmd, atlasStaging.handle, atlas.image, VK_IMAGE_LAYOUT_GENERAL, regions);
+        }
+        pendingAtlasRegions.clear();
+        Barriers.full(cmd);
     }
 
     private static long levelBytes(int width, int height, int level) {
@@ -482,6 +532,7 @@ public final class HeliosRenderer implements AutoCloseable {
         vkCmdResetQueryPool(cmd, queryPool, 0, TIMESTAMPS);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
 
+        recordAtlasRegionUpdates();
         scene.record(cmd, uniforms.anchorX(), uniforms.anchorY(), uniforms.anchorZ());
         Descriptors.accelerationStructure(ctx, rtSet, BINDING_TLAS, scene.tlas());
         Descriptors.buffer(ctx, rtSet, BINDING_GEOMETRY_TABLE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, scene.geometryTable());
@@ -586,6 +637,7 @@ public final class HeliosRenderer implements AutoCloseable {
         if (dlss != null) dlss.close();
         scene.close();
         if (atlas != null) atlas.close();
+        if (atlasStaging != null) atlasStaging.close();
         temporal.close();
         atrous.close();
         modulate.close();

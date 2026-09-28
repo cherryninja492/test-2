@@ -24,7 +24,6 @@ import org.slf4j.LoggerFactory;
  */
 final class EntityShadowCapture {
     private static final Logger LOG = LoggerFactory.getLogger("Helios");
-    private static final double RANGE = 64.0;
 
     private final float[] vertices = new float[SceneAccel.MAX_SHADOW_QUADS * 12];
     private int quads;
@@ -38,7 +37,7 @@ final class EntityShadowCapture {
     private final MultiBufferSource buffers = this::bufferFor;
     private boolean warned;
 
-    void capture(HeliosRenderer renderer, ClientLevel level, Vec3 cam, float partialTick) {
+    void capture(HeliosRenderer renderer, ClientLevel level, Vec3 cam, float partialTick, double range) {
         quads = 0;
         collector.begin(sink);
         EntityRenderDispatcher dispatcher = Minecraft.getInstance().getEntityRenderDispatcher();
@@ -48,7 +47,7 @@ final class EntityShadowCapture {
             double x = Mth.lerp(partialTick, entity.xOld, entity.getX()) - cam.x;
             double y = Mth.lerp(partialTick, entity.yOld, entity.getY()) - cam.y;
             double z = Mth.lerp(partialTick, entity.zOld, entity.getZ()) - cam.z;
-            if (x * x + y * y + z * z > RANGE * RANGE) continue;
+            if (x * x + y * y + z * z > range * range) continue;
             float yRot = Mth.lerp(partialTick, entity.yRotO, entity.getYRot());
             try {
                 dispatcher.render(entity, x, y, z, yRot, partialTick, poseStack, buffers, LightTexture.FULL_BRIGHT);
@@ -67,12 +66,24 @@ final class EntityShadowCapture {
     /** Only solid model geometry casts shadows: not name tags, blob shadows, outlines, glint or beams. */
     private VertexConsumer bufferFor(RenderType type) {
         if (type.mode() != VertexFormat.Mode.QUADS) return QuadCollector.DISCARD;
-        String name = type.toString();
+        String name = nameOf(type);
         if (name.startsWith("text") || name.contains("shadow") || name.contains("glint") || name.contains("lines")
                 || name.contains("beam") || name.contains("lightning") || name.contains("outline")) {
             return QuadCollector.DISCARD;
         }
         collector.finish(); // a new buffer never continues the previous one's quad
         return collector;
+    }
+
+    /**
+     * The render type's own name. {@code toString()} of composite types is
+     * "RenderType[name:CompositeState[...]]", and the state part lists shards such as
+     * "affects_outline", so only the name must be matched.
+     */
+    static String nameOf(RenderType type) {
+        String s = type.toString();
+        int open = s.indexOf('[');
+        int colon = s.indexOf(':');
+        return s.startsWith("RenderType[") && colon > open ? s.substring(open + 1, colon) : s;
     }
 }

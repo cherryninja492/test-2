@@ -6,7 +6,9 @@
   "client": [
     "LevelRendererMixin",
     "DebugScreenOverlayMixin",
-    "EntityRenderDispatcherMixin"
+    "EntityRenderDispatcherMixin",
+    "TextureAtlasMixin",
+    "SpriteContentsMixin"
   ],
   "injectors": {
     "defaultRequire": 1

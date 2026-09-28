@@ -4,13 +4,17 @@
 
 hitAttributeEXT vec2 bary;
 
-// Runs only for non-opaque geometry (cutout blocks and water).
+// Runs only for non-opaque geometry (cutout blocks, glass, water).
 void main() {
     Triangle tri = fetchTriangle(uint(gl_InstanceCustomIndexEXT), uint(gl_GeometryIndexEXT), uint(gl_PrimitiveID));
+    uint material = tri.v0.material;
     bool isShadowRay = (gl_IncomingRayFlagsEXT & gl_RayFlagsTerminateOnFirstHitEXT) != 0u;
-    if (isShadowRay && (tri.v0.material & MAT_WATER) != 0u) {
-        ignoreIntersectionEXT;
+    bool transmissive = (material & MAT_WATER) != 0u || surfaceOf(material) == SURFACE_GLASS;
+    if (isShadowRay && transmissive) {
+        ignoreIntersectionEXT; // water and glass let sunlight through
     }
+    // Glass is resolved in the ray generation shader (refraction), so its clear texels must be hit.
+    if (surfaceOf(material) == SURFACE_GLASS) return;
     if (textureLod(blockAtlas, interpolateUv(tri, bary), 0.0).a < 0.5) {
         ignoreIntersectionEXT;
     }

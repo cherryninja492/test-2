@@ -24,6 +24,8 @@ public final class HeliosConfig {
     public float meshBudgetMs = 3.0f;
     /** Mobs and players cast (box-shaped) ray traced shadows. */
     public boolean entityShadows = true;
+    /** Entities within this many blocks cast shadows (they are re-rendered each frame for it). */
+    public int entityShadowRange = 40;
     public final RendererSettings renderer = new RendererSettings();
 
     private final Path file;
@@ -43,6 +45,7 @@ public final class HeliosConfig {
                 config.sectionsPerFrame = parseInt(p, "sectionsPerFrame", config.sectionsPerFrame);
                 config.meshBudgetMs = Float.parseFloat(p.getProperty("meshBudgetMs", String.valueOf(config.meshBudgetMs)));
                 config.entityShadows = Boolean.parseBoolean(p.getProperty("entityShadows", String.valueOf(config.entityShadows)));
+                config.entityShadowRange = parseInt(p, "entityShadowRange", config.entityShadowRange);
                 s.upscaler = parseEnum(p, "upscaler", UpscalerBackend.class, s.upscaler);
                 s.quality = parseEnum(p, "quality", UpscaleQuality.class, s.quality);
                 s.maxBounces = parseInt(p, "maxBounces", s.maxBounces);
@@ -67,6 +70,7 @@ public final class HeliosConfig {
         p.setProperty("sectionsPerFrame", String.valueOf(sectionsPerFrame));
         p.setProperty("meshBudgetMs", String.valueOf(meshBudgetMs));
         p.setProperty("entityShadows", String.valueOf(entityShadows));
+        p.setProperty("entityShadowRange", String.valueOf(entityShadowRange));
         p.setProperty("upscaler", s.upscaler.name());
         p.setProperty("quality", s.quality.name());
         p.setProperty("maxBounces", String.valueOf(s.maxBounces));

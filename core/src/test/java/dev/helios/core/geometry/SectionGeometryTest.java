@@ -64,6 +64,16 @@ class SectionGeometryTest {
     }
 
     @Test
+    void glassSurfacesUseTheAnyHitGeometry() {
+        int glass = Materials.withSurface(Materials.pack(0, 12, false, false), Materials.SURFACE_GLASS);
+        assertEquals(Materials.SURFACE_GLASS, Materials.surface(glass));
+        assertEquals(12, Materials.blockLight(glass));
+        assertTrue(Materials.isCutout(glass), "glass must reach the any-hit shader");
+        int metal = Materials.withSurface(Materials.pack(0, false, false), Materials.SURFACE_METAL);
+        assertFalse(Materials.isCutout(metal));
+    }
+
+    @Test
     void materialPackingClampsEmission() {
         assertEquals(15, Materials.emission(Materials.pack(99, false, false)));
         assertTrue(Materials.isWater(Materials.pack(0, false, true)));

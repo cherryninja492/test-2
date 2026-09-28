@@ -11,6 +11,7 @@ import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.Level;
@@ -24,7 +25,9 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Converts one chunk section into {@link SectionGeometry} using Minecraft's baked block models,
@@ -69,7 +72,8 @@ public final class SectionMesher {
                     BakedModel model = dispatcher.getBlockModel(state);
                     boolean cutout = ItemBlockRenderTypes.getChunkRenderType(state) != RenderType.solid()
                             || state.getBlock() instanceof LeavesBlock;
-                    int material = Materials.pack(state.getLightEmission(), cutout, false);
+                    int material = Materials.withSurface(Materials.pack(state.getLightEmission(), cutout, false),
+                            surfaceOf(state.getBlock()));
                     Vec3 offset = state.getOffset(level, pos);
                     float ox = x + (float) offset.x, oy = y + (float) offset.y, oz = z + (float) offset.z;
                     long seed = state.getSeed(pos);
@@ -91,6 +95,37 @@ public final class SectionMesher {
             }
         }
         return geometry;
+    }
+
+    private static final Map<Block, Integer> SURFACES = new IdentityHashMap<>();
+
+    /**
+     * Which blocks get special optics, by registry name: glass and ice refract, metal blocks
+     * reflect glossily, gems and polished stone get a clear coat.
+     */
+    static int surfaceOf(Block block) {
+        return SURFACES.computeIfAbsent(block, b -> {
+            String id = BuiltInRegistries.BLOCK.getKey(b).getPath();
+            if (id.contains("glass") || id.equals("ice") || id.equals("packed_ice") || id.equals("blue_ice")) {
+                return Materials.SURFACE_GLASS;
+            }
+            if (id.contains("ore")) return Materials.SURFACE_DIFFUSE;
+            if (id.equals("iron_block") || id.equals("gold_block") || id.equals("netherite_block")
+                    || id.contains("copper") && !id.contains("oxidized") && !id.contains("weathered")
+                    || id.contains("anvil") || id.equals("iron_bars") || id.equals("iron_door")
+                    || id.equals("iron_trapdoor") || id.equals("chain") || id.equals("cauldron")
+                    || id.equals("hopper") || id.equals("heavy_core")) {
+                return Materials.SURFACE_METAL;
+            }
+            if (id.equals("diamond_block") || id.equals("emerald_block") || id.equals("lapis_block")
+                    || id.contains("amethyst") || id.startsWith("quartz") || id.startsWith("smooth_quartz")
+                    || id.startsWith("polished_") || id.equals("obsidian") || id.equals("crying_obsidian")
+                    || id.startsWith("prismarine") || id.startsWith("dark_prismarine") || id.equals("sea_lantern")
+                    || id.contains("glazed_terracotta") || id.equals("redstone_block")) {
+                return Materials.SURFACE_POLISHED;
+            }
+            return Materials.SURFACE_DIFFUSE;
+        });
     }
 
     /** Minecraft's block light level (0-15) at a position, as used by vanilla lighting. */

@@ -10,9 +10,11 @@ const vec3 SUN_COLOR = vec3(1.0, 0.94, 0.86);
 const float SUN_STRENGTH = 3.2;            // irradiance / PI folded into one factor
 const float SKY_AMBIENT = 0.55;            // sky radiance scale for indirect light (sun:sky balance)
 const float SUN_DISK_RADIANCE = 40.0;
-const float EMISSION_STRENGTH = 5.0;       // radiance of a light level 15 block, relative to albedo
+const float EMISSION_STRENGTH = 2.6;       // radiance of a light level 15 block, relative to albedo
 const vec3 BLOCK_LIGHT_COLOR = vec3(1.0, 0.76, 0.5);
-const float BLOCK_LIGHT_STRENGTH = 2.2;    // irradiance at block light level 15 (torch-lit surfaces)
+const float BLOCK_LIGHT_STRENGTH = 1.8;    // irradiance at block light level 15 (torch-lit surfaces)
+const float GLASS_IOR = 1.5;
+const float ICE_IOR = 1.31;
 const float MAX_DISTANCE = 4096.0;
 const float RAY_EPSILON = 1.0e-3;
 
@@ -73,6 +75,7 @@ struct SurfacePayload {
     float t;        // < 0 on miss
     vec3 normal;    // geometric, facing the incoming ray
     uint material;
+    float alpha;    // texture alpha (glass transparency)
 };
 
 struct Triangle {
@@ -123,6 +126,7 @@ vec3 emissionOf(uint material) {
 // Light from nearby light sources, from Minecraft's own light propagation (stored per quad).
 // Complements ray traced emission, which alone is too noisy/dim for small lights like torches.
 vec3 blockLightOf(uint material) {
+    if ((material & MAT_EMISSION_MASK) != 0u) return vec3(0.0); // light sources are lit by their own emission
     float level = float((material >> MAT_BLOCK_LIGHT_SHIFT) & 0xFu) / 15.0;
     return BLOCK_LIGHT_COLOR * (BLOCK_LIGHT_STRENGTH * pow(level, 2.6));
 }

@@ -142,7 +142,10 @@ public final class HeliosPipeline {
         }
         if (atlasDirty) {
             AtlasCapture.upload(renderer);
+            AtlasAnimations.clear();
             atlasDirty = false;
+        } else {
+            AtlasAnimations.drainTo(renderer);
         }
 
         // Without GPU-side sync, the previous composite must be done reading before Vulkan writes again.
@@ -150,7 +153,7 @@ public final class HeliosPipeline {
 
         Vec3 cam = camera.getPosition();
         meshSections(level, cam);
-        if (config.entityShadows) entityShadows.capture(renderer, level, cam, partialTick);
+        if (config.entityShadows) entityShadows.capture(renderer, level, cam, partialTick, config.entityShadowRange);
         else renderer.setShadowGeometry(new float[0], 0, cam.x, cam.y, cam.z);
 
         int width = mc.getMainRenderTarget().width;

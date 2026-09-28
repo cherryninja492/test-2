@@ -16,6 +16,9 @@ result back to OpenGL.
   with Minecraft's block light levels.
 - **Water** you can see into, with depth-based absorption, Fresnel reflections and underwater fog.
 - **Entity shadows**: mobs, players (including you) and items cast ray traced shadows from their animated models.
+- **Glass and ice refraction**, **glossy metal blocks** and **polished gem/stone blocks** with
+  ray traced reflections.
+- **Animated textures** (water, lava, fire) follow Minecraft's animations.
 - **Alpha-tested foliage** (leaves, grass, flowers) via an any-hit shader.
 - **Denoiser**: temporal accumulation + edge-aware à-trous wavelet filter on demodulated lighting.
 - **Upscaling**: NVIDIA DLSS Super Resolution (DLAA…Ultra Performance) when available, otherwise
@@ -52,6 +55,7 @@ result back to OpenGL.
 | `sectionsPerFrame` | `64` | max chunk sections meshed per frame |
 | `meshBudgetMs` | `3.0` | time per frame spent meshing chunk sections |
 | `entityShadows` | `true` | entities (mobs, players, items) cast ray traced shadows from their models |
+| `entityShadowRange` | `40` | blocks; entities are re-rendered each frame for their shadows |
 | `validation` | `false` | Vulkan validation layers (or `-Dhelios.validation=true`) |
 
 ## How it works

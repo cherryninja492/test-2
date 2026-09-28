@@ -2,6 +2,25 @@
 
 Jars built by CI are named `helios-<version>+<commit>.jar`.
 
+## 0.4.0
+New
+- Glass and ice refract (IOR 1.5 / 1.31) with Fresnel reflections and tint from stained glass;
+  sunlight passes through them.
+- Glossy metal blocks (iron, gold, copper, netherite, anvils, chains...) with tinted reflections.
+- Polished blocks (diamond, emerald, lapis, amethyst, quartz, prismarine, polished stone...) get
+  a glossy clear coat.
+- Animated block textures (water, lava, fire, portals...) now animate: frames are copied from
+  Minecraft's CPU-side sprite images as they are uploaded.
+
+Fixes
+- Entity shadows were missing in 0.3.0: every entity model was filtered out because Minecraft's
+  render type description contains "affects_outline".
+- Light-emitting blocks are no longer blown out (their own block light was added on top of their
+  emission; emission lowered).
+- New tonemapper (fitted ACES RRT+ODT) and lower exposure: less washed-out, no neon greens.
+- Entities behind water and glass stay visible.
+- Entity shadow range is configurable (`entityShadowRange`, default 40) to limit CPU cost.
+
 ## 0.3.0
 - Entity shadows use the real animated models (mobs, your own player, items, minecarts) instead
   of boxes; vanilla's round blob shadows are hidden while Helios renders.

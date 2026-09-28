@@ -7,6 +7,15 @@ const uint MAT_EMISSION_MASK = 0xFu;
 const uint MAT_CUTOUT = 1u << 4;
 const uint MAT_WATER = 1u << 5;
 const uint MAT_BLOCK_LIGHT_SHIFT = 8u; // bits 8-11: Minecraft block light level at the surface
+const uint MAT_SURFACE_SHIFT = 12u;    // bits 12-15: surface type
+const uint SURFACE_DIFFUSE = 0u;
+const uint SURFACE_GLASS = 1u;         // refractive dielectric (glass, ice)
+const uint SURFACE_METAL = 2u;         // glossy metal, tinted reflections
+const uint SURFACE_POLISHED = 3u;      // diffuse base with a glossy clear coat (gems, polished stone)
+
+uint surfaceOf(uint material) {
+    return (material >> MAT_SURFACE_SHIFT) & 0xFu;
+}
 
 // Normal/depth images store this distance for sky pixels.
 const float SKY_DEPTH = 1.0e6;

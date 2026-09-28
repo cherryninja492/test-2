@@ -22,4 +22,5 @@ void main() {
     hit.t = gl_HitTEXT;
     hit.normal = n;
     hit.material = tri.v0.material;
+    hit.alpha = tex.a;
 }
