@@ -41,6 +41,8 @@ public final class HeliosPipeline {
     private int rendererGeneration = -1;
     private boolean atlasDirty = true;
     private final MeshScheduler meshScheduler = new MeshScheduler();
+    private boolean meshWarned;
+    private boolean cameraUnderwater;
     private final EntityShadowCapture entityShadows = new EntityShadowCapture();
 
     // Captured at the start of LevelRenderer#renderLevel.
@@ -100,6 +102,21 @@ public final class HeliosPipeline {
         }
     }
 
+    /**
+     * Called where vanilla would draw translucent terrain (after entities): draws the water veil
+     * over entities that are beneath a water surface.
+     */
+    public void drawWaterVeil() {
+        if (!frameActive || composite == null || cameraUnderwater) return;
+        try {
+            var target = Minecraft.getInstance().getMainRenderTarget();
+            composite.drawWaterVeil(target.frameBufferId, target.getColorTextureId(), target.getDepthTextureId(),
+                    target.width, target.height, config.renderer.exposure);
+        } catch (Throwable t) {
+            fail(t);
+        }
+    }
+
     public void markAtlasDirty() {
         atlasDirty = true;
         tracker.markAllDirty();
@@ -152,7 +169,9 @@ public final class HeliosPipeline {
             AtlasAnimations.drainTo(renderer);
         }
 
-        // Without GPU-side sync, the previous composite must be done reading before Vulkan writes again.
+        // GL is done with last frame's shared images once its commands so far complete: signal Vulkan
+        // (or, without GPU-side sync, wait on the CPU) before Vulkan writes them again.
+        composite.release(renderer);
         composite.waitForGl();
 
         // Scene updates below may touch buffers of the previous frame: let it finish first.
@@ -179,7 +198,8 @@ public final class HeliosPipeline {
         boolean underwater = camera.getFluidInCamera() == FogType.WATER;
         renderer.renderFrame(new FrameInput(cam.x, cam.y, cam.z, viewRotation, projection,
                 lightDir, lightIntensity, skyLinear, rain, underwater));
-        composite.draw(renderer);
+        composite.draw();
+        cameraUnderwater = underwater;
         EntityLighting.INSTANCE.setActive(true);
     }
 
@@ -201,7 +221,19 @@ public final class HeliosPipeline {
                 tracker.markDirty(sx, sy, sz); // over budget: retry next frame
                 continue;
             }
-            if (!meshScheduler.submit(level, cache, sx, sy, sz)) {
+            if (sy < level.getMinSection() || sy >= level.getMaxSection()) continue;
+            boolean queued;
+            try {
+                queued = meshScheduler.submit(level, cache, sx, sy, sz);
+            } catch (RuntimeException e) {
+                // A section that cannot be snapshotted must not take the whole renderer down.
+                if (!meshWarned) {
+                    meshWarned = true;
+                    LOG.warn("Helios could not snapshot section {} {} {}", sx, sy, sz, e);
+                }
+                continue;
+            }
+            if (!queued) {
                 meshScheduler.invalidate(sx, sy, sz);
                 renderer.removeSection(sx, sy, sz); // empty section
             }
@@ -248,12 +280,19 @@ public final class HeliosPipeline {
     /** Message plus the innermost Helios frame, e.g. "Out of stack space. (VulkanContext.java:190)". */
     private static String describe(Throwable t) {
         String message = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
-        for (StackTraceElement e : t.getStackTrace()) {
+        StackTraceElement[] trace = t.getStackTrace();
+        for (StackTraceElement e : trace) {
             if (e.getClassName().startsWith("dev.helios.")) {
                 return message + " (" + e.getFileName() + ":" + e.getLineNumber() + ")";
             }
         }
-        return message;
+        if (trace.length > 0) {
+            StackTraceElement top = trace[0];
+            return message + " (in " + top.getClassName().substring(top.getClassName().lastIndexOf('.') + 1)
+                    + "." + top.getMethodName() + ")";
+        }
+        // The JVM drops traces of frequently thrown exceptions; -XX:-OmitStackTraceInFastThrow keeps them.
+        return message + " (no stack trace: add -XX:-OmitStackTraceInFastThrow to the JVM arguments)";
     }
 
     public void shutdown() {

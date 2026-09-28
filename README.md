@@ -41,6 +41,7 @@ result back to OpenGL.
 | --- | --- |
 | F9  | Toggle ray tracing (falls back to vanilla instantly) |
 | F10 | Cycle upscaling quality |
+| F6  | Cycle DLSS jitter sign (use if the DLSS image shakes) |
 
 `config/helios.properties`:
 

@@ -38,6 +38,7 @@ public final class RayTracingPipeline implements AutoCloseable {
     public static final int BINDING_LIGHT_INDICES = 13;
     public static final int BINDING_PROBES_IN = 14;
     public static final int BINDING_PROBES_OUT = 15;
+    public static final int BINDING_OUT_WATER_VEIL = 16;
 
     private static final int STAGES = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
             | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
@@ -69,7 +70,8 @@ public final class RayTracingPipeline implements AutoCloseable {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
 
         String[] names = {"pathtrace.rgen", "primary.rmiss", "shadow.rmiss", "surface.rchit", "alphatest.rahit", "probe.rgen"};
         int[] stages = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR,

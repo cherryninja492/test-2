@@ -58,6 +58,7 @@ public final class HeliosConfig {
                 s.denoiserIterations = parseInt(p, "denoiserIterations", s.denoiserIterations);
                 s.exposure = Float.parseFloat(p.getProperty("exposure", String.valueOf(s.exposure)));
                 s.validation = Boolean.parseBoolean(p.getProperty("validation", "false"));
+                s.dlssJitterMode = parseInt(p, "dlssJitterMode", s.dlssJitterMode) & 3;
             } catch (IOException | IllegalArgumentException e) {
                 LOG.warn("Invalid {}, using defaults: {}", file, e.toString());
             }
@@ -84,6 +85,7 @@ public final class HeliosConfig {
         p.setProperty("denoiserIterations", String.valueOf(s.denoiserIterations));
         p.setProperty("exposure", String.valueOf(s.exposure));
         p.setProperty("validation", String.valueOf(s.validation));
+        p.setProperty("dlssJitterMode", String.valueOf(s.dlssJitterMode));
         try {
             Files.createDirectories(file.getParent());
             try (Writer w = Files.newBufferedWriter(file)) {

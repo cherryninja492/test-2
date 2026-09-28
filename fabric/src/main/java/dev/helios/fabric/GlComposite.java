@@ -49,16 +49,47 @@ final class GlComposite implements AutoCloseable {
             void main() {
                 // Vulkan row 0 is the top of the image; GL texture row 0 is sampled at t = 0.
                 vec2 t = vec2(uv.x, 1.0 - uv.y);
-                float depth = texture(uDepth, t).r;
+                float depth = texture(uDepth, t).r; // opaque surface depth
                 if (depth >= 1.0) discard; // sky: keep what vanilla drew (sun, moon, stars, sunsets)
                 fragColor = vec4(texture(uColor, t).rgb, 1.0);
                 gl_FragDepth = depth;
             }
             """;
 
+    // Drawn over entities under a water surface (they are rendered after the ray traced image):
+    // what the water adds, with the entity showing through by the veil's alpha.
+    private static final String VEIL_FRAGMENT = """
+            #version 150
+            uniform sampler2D uVeil;
+            uniform sampler2D uDepth;
+            uniform sampler2D uSceneDepth;
+            uniform float uExposure;
+            in vec2 uv;
+            out vec4 fragColor;
+            vec3 aces(vec3 c) {
+                c = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777) * c;
+                vec3 a = c * (c + 0.0245786) - 0.000090537;
+                vec3 b = c * (0.983729 * c + 0.4329510) + 0.238081;
+                c = mat3(1.60475, -0.10208, -0.00327, -0.53108, 1.10813, -0.07276, -0.07367, -0.00605, 1.07602) * (a / b);
+                return clamp(c, 0.0, 1.0);
+            }
+            void main() {
+                vec2 t = vec2(uv.x, 1.0 - uv.y);
+                vec2 depth = texture(uDepth, t).rg;       // opaque surface, water surface
+                float scene = texture(uSceneDepth, uv).r; // after entities were drawn
+                // Only where an entity was drawn in front of the ray traced surface but behind water.
+                if (depth.g >= 1.0 || scene >= depth.r - 1.0e-6 || scene <= depth.g) discard;
+                vec4 veil = texture(uVeil, t);
+                fragColor = vec4(pow(aces(veil.rgb * uExposure), vec3(1.0 / 2.2)), veil.a);
+            }
+            """;
+
     private final int program;
+    private final int veilProgram;
     private final int vao;
-    private int colorTexture, depthTexture, colorMemory, depthMemory;
+    private final int veilFramebuffer;
+    private int colorTexture, depthTexture, veilTexture, colorMemory, depthMemory, veilMemory;
+    private boolean pendingRelease;
     private long pendingSync;
     // GPU-side sync with Vulkan (GL_EXT_semaphore); 0 when unavailable.
     private int vulkanDone, glDone;
@@ -75,6 +106,14 @@ final class GlComposite implements AutoCloseable {
         glUniform1i(glGetUniformLocation(program, "uDepth"), 1);
         glUseProgram(previous);
         vao = glGenVertexArrays();
+
+        veilProgram = link(compile(GL_VERTEX_SHADER, VERTEX), compile(GL_FRAGMENT_SHADER, VEIL_FRAGMENT));
+        glUseProgram(veilProgram);
+        glUniform1i(glGetUniformLocation(veilProgram, "uVeil"), 0);
+        glUniform1i(glGetUniformLocation(veilProgram, "uDepth"), 1);
+        glUniform1i(glGetUniformLocation(veilProgram, "uSceneDepth"), 2);
+        glUseProgram(previous);
+        veilFramebuffer = glGenFramebuffers();
     }
 
     /** {@code GL_DEVICE_UUID_EXT} of the GPU running this GL context, so Vulkan picks the same one. */
@@ -122,7 +161,9 @@ final class GlComposite implements AutoCloseable {
         colorMemory = importMemory(targets.color(), targets.win32Handles());
         colorTexture = texture(colorMemory, GL_RGBA8, targets.color());
         depthMemory = importMemory(targets.depth(), targets.win32Handles());
-        depthTexture = texture(depthMemory, GL_R32F, targets.depth());
+        depthTexture = texture(depthMemory, GL_RG32F, targets.depth());
+        veilMemory = importMemory(targets.waterVeil(), targets.win32Handles());
+        veilTexture = texture(veilMemory, GL_RGBA16F, targets.waterVeil());
     }
 
     private static int importMemory(HeliosRenderer.SharedImage image, boolean win32) {
@@ -151,9 +192,9 @@ final class GlComposite implements AutoCloseable {
     }
 
     /** Draws the ray traced frame into the currently bound framebuffer (colour + depth). */
-    void draw(HeliosRenderer renderer) {
-        int[] textures = {colorTexture, depthTexture};
-        int[] layouts = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
+    void draw() {
+        int[] textures = {colorTexture, depthTexture, veilTexture};
+        int[] layouts = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
         if (vulkanDone != 0) glWaitSemaphoreEXT(vulkanDone, new int[0], textures, layouts);
 
         int previousProgram = glGetInteger(GL_CURRENT_PROGRAM);
@@ -181,8 +222,65 @@ final class GlComposite implements AutoCloseable {
         GlStateManager._bindTexture(0);
         GlStateManager._glBindVertexArray(previousVao);
         GlStateManager._glUseProgram(previousProgram);
+        pendingRelease = true;
+    }
 
+    /**
+     * Draws the water veil over entities beneath water surfaces. Renders into {@code colorTexture}
+     * (Minecraft's main colour buffer) through a separate framebuffer, so Minecraft's depth texture
+     * can be sampled without a feedback loop. Leaves {@code mainFramebuffer} bound.
+     */
+    void drawWaterVeil(int mainFramebuffer, int mainColorTexture, int mainDepthTexture, int width, int height,
+                       float exposure) {
+        if (veilTexture == 0) return;
+        int previousProgram = glGetInteger(GL_CURRENT_PROGRAM);
+        int previousVao = glGetInteger(GL_VERTEX_ARRAY_BINDING);
+
+        GlStateManager._glBindFramebuffer(GL_FRAMEBUFFER, veilFramebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mainColorTexture, 0);
+        GlStateManager._viewport(0, 0, width, height);
+
+        GlStateManager._glUseProgram(veilProgram);
+        glUniform1f(glGetUniformLocation(veilProgram, "uExposure"), exposure * 1.3f);
+        GlStateManager._glBindVertexArray(vao);
+        GlStateManager._activeTexture(GL_TEXTURE2);
+        GlStateManager._bindTexture(mainDepthTexture);
+        GlStateManager._activeTexture(GL_TEXTURE1);
+        GlStateManager._bindTexture(depthTexture);
+        GlStateManager._activeTexture(GL_TEXTURE0);
+        GlStateManager._bindTexture(veilTexture);
+        GlStateManager._disableDepthTest();
+        GlStateManager._depthMask(false);
+        GlStateManager._enableBlend();
+        GlStateManager._blendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE); // dst * a + veil
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        GlStateManager._blendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+        GlStateManager._disableBlend();
+        GlStateManager._depthMask(true);
+        GlStateManager._enableDepthTest();
+        GlStateManager._activeTexture(GL_TEXTURE2);
+        GlStateManager._bindTexture(0);
+        GlStateManager._activeTexture(GL_TEXTURE1);
+        GlStateManager._bindTexture(0);
+        GlStateManager._activeTexture(GL_TEXTURE0);
+        GlStateManager._bindTexture(0);
+        GlStateManager._glBindVertexArray(previousVao);
+        GlStateManager._glUseProgram(previousProgram);
+        GlStateManager._glBindFramebuffer(GL_FRAMEBUFFER, mainFramebuffer);
+    }
+
+    /**
+     * Ends GL's use of the shared images for the frame that was drawn (called before the next
+     * Vulkan frame): signals Vulkan on the GPU, or records a fence for the CPU fallback.
+     */
+    void release(HeliosRenderer renderer) {
+        if (!pendingRelease) return;
+        pendingRelease = false;
         if (glDone != 0) {
+            int[] textures = {colorTexture, depthTexture, veilTexture};
+            int[] layouts = {GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT, GL_LAYOUT_GENERAL_EXT};
             glSignalSemaphoreEXT(glDone, new int[0], textures, layouts);
             glFlush();
             renderer.markGlSignaled();
@@ -208,9 +306,11 @@ final class GlComposite implements AutoCloseable {
         if (colorTexture != 0) {
             glDeleteTextures(colorTexture);
             glDeleteTextures(depthTexture);
+            glDeleteTextures(veilTexture);
             glDeleteMemoryObjectsEXT(colorMemory);
             glDeleteMemoryObjectsEXT(depthMemory);
-            colorTexture = depthTexture = colorMemory = depthMemory = 0;
+            glDeleteMemoryObjectsEXT(veilMemory);
+            colorTexture = depthTexture = veilTexture = colorMemory = depthMemory = veilMemory = 0;
         }
     }
 
@@ -247,5 +347,7 @@ final class GlComposite implements AutoCloseable {
         }
         glDeleteVertexArrays(vao);
         glDeleteProgram(program);
+        glDeleteProgram(veilProgram);
+        glDeleteFramebuffers(veilFramebuffer);
     }
 }

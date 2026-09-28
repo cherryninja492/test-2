@@ -8,6 +8,7 @@ package dev.helios.core.geometry;
  *  bit  4    cutout: alpha tested in the any-hit shader
  *  bit  5    water: specular reflections with Fresnel; transparent to shadow rays
  *  bit  6    foliage: thin plant, lit from both sides
+ *  bit  7    flowing liquid: more of the texture shows on the surface
  *  bits 8-11 Minecraft block light level (0-15) in front of the face
  *  bits 12-15 surface type: 0 diffuse, 1 glass (refractive), 2 metal, 3 polished (clear coat)
  * </pre>
@@ -19,6 +20,7 @@ public final class Materials {
     public static final int CUTOUT = 1 << 4;
     public static final int WATER = 1 << 5;
     public static final int FOLIAGE = 1 << 6;
+    public static final int FLOWING = 1 << 7;
     public static final int BLOCK_LIGHT_SHIFT = 8;
     public static final int SURFACE_SHIFT = 12;
     public static final int SURFACE_DIFFUSE = 0;

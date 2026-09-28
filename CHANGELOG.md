@@ -2,6 +2,17 @@
 
 Jars built by CI are named `helios-<version>+<commit>.jar`.
 
+## 0.5.1
+- Fix "Helios could not start: ArrayIndexOutOfBoundsException": Minecraft marks sections above and
+  below the world height as dirty, and the new threaded mesher tried to snapshot them. Out-of-range
+  sections are skipped and a section that fails to snapshot no longer stops the renderer.
+- Failure messages always name a location, or explain why there is none.
+- Entities under water now look under water: Helios draws the water surface (reflection, texture,
+  tint) over submerged entities at the point where vanilla draws translucent water.
+- Flowing water and waterfalls show much more of their texture.
+- Shaking when upscaling: the built-in TAAU clamps history less tightly when upscaling, and F6
+  cycles the DLSS jitter sign convention (`dlssJitterMode`) - keep the one where the image is steady.
+
 ## 0.5.0
 New
 - Ray traced point lights: every light-emitting block (torches, lanterns, glowstone, lava, soul

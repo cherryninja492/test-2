@@ -38,7 +38,9 @@ public final class SectionTracker {
     }
 
     public synchronized void markDirty(int sx, int sy, int sz) {
-        if (level != null && loadedChunks.contains(ChunkPos.asLong(sx, sz))) {
+        // Vanilla also marks neighbours above/below the world's height range; those do not exist.
+        if (level != null && sy >= level.getMinSection() && sy < level.getMaxSection()
+                && loadedChunks.contains(ChunkPos.asLong(sx, sz))) {
             dirtySections.add(SectionPos.asLong(sx, sy, sz));
         }
     }

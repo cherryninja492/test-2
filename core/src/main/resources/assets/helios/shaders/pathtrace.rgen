@@ -16,7 +16,8 @@ layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outIndirect;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outAlbedo;
 layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D outNormalDepth;
 layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D outMotion;   // xy motion (uv), z expected previous distance
-layout(set = 0, binding = 8, r32f) uniform writeonly image2D outDepth;
+layout(set = 0, binding = 8, rg32f) uniform writeonly image2D outDepth;     // x opaque surface, y water surface (1 = none)
+layout(set = 0, binding = 16, rgba16f) uniform writeonly image2D outWaterVeil; // rgb water light over submerged entities, a transmittance
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D outDirect;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D outSpecular;
 
@@ -33,6 +34,7 @@ const int LIGHT_CANDIDATES = 8;
 const float POINT_LIGHT_POWER = 5.0;
 const float POINT_LIGHT_RANGE = 16.0;
 const float WATER_SURFACE_OPACITY = 0.28; // share of the (animated) water texture seen on the surface
+const float FLOWING_WATER_OPACITY = 0.6;  // flowing water and waterfalls show more of their texture
 
 bool isClearGlass() {
     return surfaceOf(hit.material) == SURFACE_GLASS && hit.alpha < 0.95;
@@ -208,6 +210,8 @@ void main() {
     vec3 specular = vec3(0.0);
     vec3 waterAlbedo = DEFAULT_WATER_ALBEDO;
     float interfaceDepth = -1.0;
+    float waterSurfaceDepth = 1.0;
+    vec4 waterVeil = vec4(0.0, 0.0, 0.0, 1.0);
     bool solid = false;
     for (int i = 0; i < MAX_INTERFACES; i++) {
         bool found = traceSurface(origin, dir);
@@ -234,12 +238,23 @@ void main() {
             if (!inWater) {
                 vec3 surfaceAlbedo = hit.albedo;
                 uint surfaceMaterial = hit.material;
+                float opacity = (surfaceMaterial & MAT_FLOWING) != 0u ? FLOWING_WATER_OPACITY : WATER_SURFACE_OPACITY;
                 float f = fresnelSchlick(cosI, 0.02);
-                specular += transmittance * f * traceReflection(p + n * RAY_EPSILON, reflect(dir, n), rng);
+                vec3 surface = f * traceReflection(p + n * RAY_EPSILON, reflect(dir, n), rng);
                 // A share of the animated water texture, lit like a surface (vanilla-like look).
                 vec3 surfaceLight = directLight(p, n, surfaceMaterial, rng) + ambientSky(n) + blockLightOf(surfaceMaterial);
-                specular += transmittance * (1.0 - f) * WATER_SURFACE_OPACITY * surfaceAlbedo * surfaceLight;
-                transmittance *= (1.0 - f) * (1.0 - WATER_SURFACE_OPACITY);
+                surface += (1.0 - f) * opacity * surfaceAlbedo * surfaceLight;
+                float through = (1.0 - f) * (1.0 - opacity);
+                specular += transmittance * surface;
+                if (waterSurfaceDepth >= 1.0) {
+                    // What this water surface adds over entities the game draws beneath it, with a
+                    // couple of blocks of absorption for their depth.
+                    waterSurfaceDepth = glDepthOf(p);
+                    vec3 shallow = waterTransmittance(2.0);
+                    waterVeil = vec4(transmittance * (surface + through * waterInscatter(shallow, surfaceAlbedo)),
+                                     through * dot(shallow, vec3(0.333)));
+                }
+                transmittance *= through;
             }
             inWater = !inWater;
             throughWater = true;
@@ -280,7 +295,8 @@ void main() {
         imageStore(outNormalDepth, pixel, vec4(0.0, 0.0, 0.0, SKY_DEPTH));
         imageStore(outMotion, pixel, vec4(motionFromClip(prevClip, centerUv), 0.0, 0.0));
         // Pure sky (depth 1) is left to vanilla; sky seen through water/glass is ours.
-        imageStore(outDepth, pixel, vec4(interfaceDepth >= 0.0 ? interfaceDepth : 1.0));
+        imageStore(outDepth, pixel, vec4(interfaceDepth >= 0.0 ? interfaceDepth : 1.0, waterSurfaceDepth, 0.0, 0.0));
+        imageStore(outWaterVeil, pixel, waterVeil);
         return;
     }
 
@@ -330,5 +346,6 @@ void main() {
     imageStore(outSpecular, pixel, vec4(min(specular, vec3(FIREFLY_CLAMP)), 1.0));
     imageStore(outNormalDepth, pixel, vec4(n, distance));
     imageStore(outMotion, pixel, vec4(motion, expectedPrevDistance, 0.0));
-    imageStore(outDepth, pixel, vec4(glDepth));
+    imageStore(outDepth, pixel, vec4(glDepth, waterSurfaceDepth, 0.0, 0.0));
+    imageStore(outWaterVeil, pixel, waterVeil);
 }

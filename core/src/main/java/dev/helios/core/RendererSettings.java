@@ -13,6 +13,11 @@ public final class RendererSettings {
     public boolean denoiser = true;
     public int denoiserIterations = 4;
     public float exposure = 1.0f;
+    /**
+     * Sign convention of the jitter passed to DLSS: 0 = (+x, +y), 1 = (+x, -y), 2 = (-x, -y),
+     * 3 = (-x, +y). The wrong one makes the upscaled image shake.
+     */
+    public int dlssJitterMode = 0;
     /** Enables Vulkan validation layers (slow; for development). */
     public boolean validation = false;
 }

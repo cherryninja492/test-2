@@ -2,8 +2,10 @@
   "key.categories.helios": "Helios Ray Tracing",
   "key.helios.toggle": "Toggle ray tracing",
   "key.helios.cycle_quality": "Cycle upscaling quality",
+  "key.helios.cycle_dlss_jitter": "Cycle DLSS jitter mode (fixes shaking)",
   "helios.message.enabled": "Helios ray tracing enabled (%s, %s)",
   "helios.message.disabled": "Helios ray tracing disabled",
   "helios.message.quality": "Helios upscaling: %s via %s",
-  "helios.message.failed": "Helios could not start: %s"
+  "helios.message.failed": "Helios could not start: %s",
+  "helios.message.dlss_jitter": "Helios DLSS jitter mode %s (0-3): keep the one where the image is steady"
 }

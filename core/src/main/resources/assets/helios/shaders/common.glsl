@@ -7,6 +7,7 @@ const uint MAT_EMISSION_MASK = 0xFu;
 const uint MAT_CUTOUT = 1u << 4;
 const uint MAT_WATER = 1u << 5;
 const uint MAT_FOLIAGE = 1u << 6;      // thin plants: lit from both sides
+const uint MAT_FLOWING = 1u << 7;      // flowing/falling liquid: more of the texture shows
 const uint MAT_BLOCK_LIGHT_SHIFT = 8u; // bits 8-11: Minecraft block light level at the surface
 const uint MAT_SURFACE_SHIFT = 12u;    // bits 12-15: surface type
 const uint SURFACE_DIFFUSE = 0u;

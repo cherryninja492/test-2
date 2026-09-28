@@ -51,10 +51,13 @@ public final class HeliosRenderer implements AutoCloseable {
 
     /**
      * @param color        RGBA8, display resolution, tonemapped and gamma encoded, row 0 = top
-     * @param depth        R32F, render resolution, OpenGL window-space depth (1 = sky), row 0 = top
+     * @param depth        RG32F, render resolution, OpenGL window-space depth of the opaque surface
+     *                     (1 = sky) and of the first water surface in front of it (1 = none); row 0 = top
+     * @param waterVeil    RGBA16F, render resolution: HDR light a water surface adds over entities
+     *                     beneath it (rgb) and the share of them that shows through (a)
      * @param win32Handles true if handles are Win32 NT handles, false for POSIX fds
      */
-    public record SharedTargets(SharedImage color, SharedImage depth, boolean win32Handles) {
+    public record SharedTargets(SharedImage color, SharedImage depth, SharedImage waterVeil, boolean win32Handles) {
     }
 
     /**
@@ -120,7 +123,7 @@ public final class HeliosRenderer implements AutoCloseable {
     private GpuBuffer atlasStaging;
 
     // Render resolution
-    private GpuImage indirect, direct, specular, albedo, normalDepth, prevNormalDepth, motion, depth;
+    private GpuImage indirect, direct, specular, albedo, normalDepth, prevNormalDepth, motion, depth, waterVeil;
     private final GpuImage[] history = new GpuImage[2];
     private GpuImage atrousA, atrousB, denoised;
     // Display resolution
@@ -423,7 +426,8 @@ public final class HeliosRenderer implements AutoCloseable {
         normalDepth = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         prevNormalDepth = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         motion = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
-        depth = GpuImage.createExportable(ctx, renderW, renderH, VK_FORMAT_R32_SFLOAT, USAGE_STORAGE);
+        depth = GpuImage.createExportable(ctx, renderW, renderH, VK_FORMAT_R32G32_SFLOAT, USAGE_STORAGE);
+        waterVeil = GpuImage.createExportable(ctx, renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT, USAGE_STORAGE);
         history[0] = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         history[1] = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         atrousA = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -459,6 +463,7 @@ public final class HeliosRenderer implements AutoCloseable {
         return new SharedTargets(
                 new SharedImage(output.exportHandle(), output.exportSize, displayW, displayH),
                 new SharedImage(depth.exportHandle(), depth.exportSize, renderW, renderH),
+                new SharedImage(waterVeil.exportHandle(), waterVeil.exportSize, renderW, renderH),
                 win32);
     }
 
@@ -498,7 +503,7 @@ public final class HeliosRenderer implements AutoCloseable {
 
     private List<GpuImage> allTargets() {
         List<GpuImage> list = new ArrayList<>(List.of(indirect, direct, specular, albedo, normalDepth, prevNormalDepth,
-                motion, depth, history[0], history[1], atrousA, atrousB, denoised, taauHistory[0], taauHistory[1],
+                motion, depth, waterVeil, history[0], history[1], atrousA, atrousB, denoised, taauHistory[0], taauHistory[1],
                 dlssOutput, output));
         list.removeIf(java.util.Objects::isNull);
         return list;
@@ -512,6 +517,7 @@ public final class HeliosRenderer implements AutoCloseable {
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_DEPTH, depth);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_DIRECT, direct);
         Descriptors.storageImage(ctx, rtSet, BINDING_OUT_SPECULAR, specular);
+        Descriptors.storageImage(ctx, rtSet, BINDING_OUT_WATER_VEIL, waterVeil);
 
         for (int p = 0; p < 2; p++) {
             long set = temporal.set(p);
@@ -680,7 +686,10 @@ public final class HeliosRenderer implements AutoCloseable {
 
         int tonemapSet;
         if (activeBackend == UpscalerBackend.DLSS) {
-            dlss.evaluate(cmd, denoised, depth, motion, dlssOutput, jitter[0], jitter[1], resetHistory);
+            int mode = settings.dlssJitterMode & 3;
+            float jx = mode >= 2 ? -jitter[0] : jitter[0];
+            float jy = mode == 1 || mode == 2 ? -jitter[1] : jitter[1];
+            dlss.evaluate(cmd, denoised, depth, motion, dlssOutput, jx, jy, resetHistory);
             tonemapSet = 2;
         } else {
             float blend = renderW == displayW ? 0.1f : 0.06f;
@@ -743,7 +752,7 @@ public final class HeliosRenderer implements AutoCloseable {
     private void destroyTargets() {
         if (output == null) return;
         allTargets().forEach(GpuImage::close);
-        indirect = direct = specular = albedo = normalDepth = prevNormalDepth = motion = depth = null;
+        indirect = direct = specular = albedo = normalDepth = prevNormalDepth = motion = depth = waterVeil = null;
         atrousA = atrousB = denoised = dlssOutput = output = null;
         history[0] = history[1] = taauHistory[0] = taauHistory[1] = null;
     }

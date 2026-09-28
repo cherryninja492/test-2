@@ -226,6 +226,7 @@ public final class SectionMesher {
         int emission = fluid.createLegacyBlock().getLightEmission();
         if (emission > 0) addLight(x, y, z, emission, fluid.createLegacyBlock().getBlock());
         int material = Materials.pack(emission, Math.max(blockLight(level, pos), emission), false, water);
+        if (!fluid.isSource()) material |= Materials.FLOWING;
         dispatcher.renderLiquid(pos, level, liquidCollector.begin((p, uv, rgb) -> geometry.addQuad(p, uv, rgb, material)),
                 state, fluid);
         liquidCollector.finish();

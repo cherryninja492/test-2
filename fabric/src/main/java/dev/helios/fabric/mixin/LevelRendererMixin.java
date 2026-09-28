@@ -6,6 +6,7 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.LightTexture;
+import net.minecraft.client.renderer.RenderType;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -35,6 +36,16 @@ public abstract class LevelRendererMixin {
     @Inject(method = "renderSky", at = @At("RETURN"))
     private void helios$afterSky(CallbackInfo ci) {
         HeliosPipeline.INSTANCE.renderAfterSky();
+    }
+
+    // Declared before the cancelling injector so it runs first. Vanilla draws translucent terrain
+    // (water) after entities; Helios draws its water veil over submerged entities at that point.
+    @Inject(method = "renderSectionLayer", at = @At("HEAD"), require = 0)
+    private void helios$waterVeil(RenderType renderType, double x, double y, double z, Matrix4f frustumMatrix,
+                                  Matrix4f projectionMatrix, CallbackInfo ci) {
+        if (renderType == RenderType.translucent() && HeliosPipeline.INSTANCE.isRenderingFrame()) {
+            HeliosPipeline.INSTANCE.drawWaterVeil();
+        }
     }
 
     @Inject(method = "renderSectionLayer", at = @At("HEAD"), cancellable = true)

@@ -50,7 +50,15 @@ public final class HeliosClient implements ClientModInitializer {
         KeyMapping cycleQuality = KeyBindingHelper.registerKeyBinding(
                 new KeyMapping("key.helios.cycle_quality", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_F10, CATEGORY));
 
+        KeyMapping cycleJitter = KeyBindingHelper.registerKeyBinding(
+                new KeyMapping("key.helios.cycle_dlss_jitter", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_F6, CATEGORY));
+
         ClientTickEvents.END_CLIENT_TICK.register(mc -> {
+            while (cycleJitter.consumeClick()) {
+                config.renderer.dlssJitterMode = (config.renderer.dlssJitterMode + 1) & 3;
+                config.save();
+                message(mc, Component.translatable("helios.message.dlss_jitter", config.renderer.dlssJitterMode));
+            }
             while (toggle.consumeClick()) {
                 pipeline.toggle();
                 status(mc, pipeline);

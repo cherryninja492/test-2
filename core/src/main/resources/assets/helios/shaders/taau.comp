@@ -42,8 +42,11 @@ void main() {
     }
     vec3 mean = m1 / 9.0;
     vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-    vec3 boxMin = mean - 1.25 * sigma;
-    vec3 boxMax = mean + 1.25 * sigma;
+    // A tight box snaps the history to the jittered low-resolution frame when upscaling, which
+    // shows up as shaking; widen it with the upscale factor.
+    float gamma = mix(1.25, 2.25, clamp(pc.displaySize.x / pc.renderSize.x - 1.0, 0.0, 1.0));
+    vec3 boxMin = mean - gamma * sigma;
+    vec3 boxMax = mean + gamma * sigma;
 
     vec2 historyUv = uv + imageLoad(motionVectors, rp).xy;
     if (pc.reset != 0 || any(lessThan(historyUv, vec2(0.0))) || any(greaterThan(historyUv, vec2(1.0)))) {
