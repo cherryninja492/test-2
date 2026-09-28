@@ -3,6 +3,7 @@ package dev.helios.core;
 import dev.helios.core.dlss.DlssBridge;
 import dev.helios.core.dlss.DlssUpscaler;
 import dev.helios.core.geometry.SectionGeometry;
+import dev.helios.core.lighting.LightGrid;
 import dev.helios.core.math.FrameUniforms;
 import dev.helios.core.math.Jitter;
 import dev.helios.core.math.UpscaleQuality;
@@ -92,6 +93,21 @@ public final class HeliosRenderer implements AutoCloseable {
     private final FrameUniforms uniforms = new FrameUniforms();
     private final ByteBuffer push = MemoryUtil.memAlloc(32).order(ByteOrder.LITTLE_ENDIAN);
 
+    // Point lights
+    private final LightGrid lightGrid = new LightGrid();
+    private GpuBuffer lightBuffer, lightCellBuffer, lightIndexBuffer;
+    private boolean pointLightsEnabled;
+
+    // Entity lighting probes
+    public static final int MAX_PROBES = 512;
+    private final float[] probePositions = new float[MAX_PROBES * 3];
+    private int probeCount;
+    private double probeOriginX, probeOriginY, probeOriginZ;
+    private final GpuBuffer probeInput, probeOutput;
+    private int probesInFlight;
+    private final float[] probeResults = new float[MAX_PROBES * 2];
+    private int probeResultCount;
+
     private SharedSemaphore vulkanDone, glDone;
     private boolean glSignaled;
     private boolean frameInFlight;
@@ -166,6 +182,15 @@ public final class HeliosRenderer implements AutoCloseable {
         rtSet = Descriptors.allocate(ctx, descriptorPool, rtPipeline.setLayout);
         Descriptors.buffer(ctx, rtSet, BINDING_FRAME, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frameUbo);
 
+        lightBuffer = GpuBuffer.hostVisible(ctx, 1024L * LightGrid.LIGHT_STRIDE * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        lightCellBuffer = GpuBuffer.hostVisible(ctx, LightGrid.CELL_COUNT * 8L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        lightIndexBuffer = GpuBuffer.hostVisible(ctx, 16384L * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        probeInput = GpuBuffer.hostVisible(ctx, MAX_PROBES * 16L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        probeOutput = GpuBuffer.readback(ctx, MAX_PROBES * 16L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Descriptors.buffer(ctx, rtSet, BINDING_PROBES_IN, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, probeInput);
+        Descriptors.buffer(ctx, rtSet, BINDING_PROBES_OUT, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, probeOutput);
+        bindLightBuffers();
+
         cmd = Commands.allocate(ctx);
         fence = Commands.createFence(ctx);
         queryPool = createQueryPool();
@@ -194,10 +219,41 @@ public final class HeliosRenderer implements AutoCloseable {
 
     public void removeSection(int sx, int sy, int sz) {
         scene.remove(sx, sy, sz);
+        lightGrid.removeSection(sx, sy, sz);
+    }
+
+    /**
+     * Light-emitting blocks of a section: {@link LightGrid#INPUT_STRIDE} floats each
+     * (section-local x, y, z, intensity 0-1, r, g, b).
+     */
+    public void setSectionLights(int sx, int sy, int sz, float[] lights, int count) {
+        lightGrid.setSectionLights(sx, sy, sz, lights, count);
+    }
+
+    /**
+     * Entity lighting probes for this frame (xyz relative to a world-space origin). Results arrive
+     * one frame later through {@link #probeResults()}.
+     */
+    public void setProbes(float[] positions, int count, double originX, double originY, double originZ) {
+        probeCount = Math.min(count, MAX_PROBES);
+        System.arraycopy(positions, 0, probePositions, 0, probeCount * 3);
+        probeOriginX = originX;
+        probeOriginY = originY;
+        probeOriginZ = originZ;
+    }
+
+    /** Per probe of the last completed frame: sun visibility (0-1), water depth above (blocks). */
+    public float[] probeResults() {
+        return probeResults;
+    }
+
+    public int probeResultCount() {
+        return probeResultCount;
     }
 
     public void clearSections() {
         scene.clear();
+        lightGrid.clear();
         resetHistory = true;
         uniforms.reset();
     }
@@ -364,8 +420,8 @@ public final class HeliosRenderer implements AutoCloseable {
         direct = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         specular = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         albedo = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
-        normalDepth = image(renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT);
-        prevNormalDepth = image(renderW, renderH, VK_FORMAT_R32G32B32A32_SFLOAT);
+        normalDepth = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
+        prevNormalDepth = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         motion = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
         depth = GpuImage.createExportable(ctx, renderW, renderH, VK_FORMAT_R32_SFLOAT, USAGE_STORAGE);
         history[0] = image(renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -513,6 +569,62 @@ public final class HeliosRenderer implements AutoCloseable {
         Commands.waitAndReset(ctx, fence);
         frameInFlight = false;
         readTimings();
+        if (probesInFlight > 0) {
+            probeOutput.invalidate();
+            java.nio.FloatBuffer out = probeOutput.mapped().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+            for (int i = 0; i < probesInFlight; i++) {
+                probeResults[i * 2] = out.get(i * 4);
+                probeResults[i * 2 + 1] = out.get(i * 4 + 1);
+            }
+        }
+        probeResultCount = probesInFlight;
+        probesInFlight = 0;
+    }
+
+    private void updateLightGrid(FrameInput in) {
+        int camSx = (int) Math.floor(in.cameraX() / 16.0);
+        int camSy = (int) Math.floor(in.cameraY() / 16.0);
+        int camSz = (int) Math.floor(in.cameraZ() / 16.0);
+        if (lightGrid.build(camSx, camSy, camSz)) {
+            int lights = lightGrid.lightCount();
+            if (lightBuffer.size < (long) lights * LightGrid.LIGHT_STRIDE * 4) {
+                lightBuffer.close();
+                lightBuffer = GpuBuffer.hostVisible(ctx, (long) lights * LightGrid.LIGHT_STRIDE * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            }
+            if (lightIndexBuffer.size < lightGrid.indexCount() * 4L) {
+                lightIndexBuffer.close();
+                lightIndexBuffer = GpuBuffer.hostVisible(ctx, lightGrid.indexCount() * 8L, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            }
+            lightBuffer.mapped().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().put(lightGrid.lights(), 0, lights * LightGrid.LIGHT_STRIDE);
+            lightCellBuffer.mapped().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().put(lightGrid.cells());
+            lightIndexBuffer.mapped().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().put(lightGrid.indices(), 0, lightGrid.indexCount());
+            lightBuffer.flush();
+            lightCellBuffer.flush();
+            lightIndexBuffer.flush();
+            bindLightBuffers();
+            pointLightsEnabled = lights > 0;
+        }
+        uniforms.setLightGrid(lightGrid.originBlockX(), lightGrid.originBlockY(), lightGrid.originBlockZ(), pointLightsEnabled);
+    }
+
+    private void bindLightBuffers() {
+        Descriptors.buffer(ctx, rtSet, BINDING_LIGHTS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, lightBuffer);
+        Descriptors.buffer(ctx, rtSet, BINDING_LIGHT_CELLS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, lightCellBuffer);
+        Descriptors.buffer(ctx, rtSet, BINDING_LIGHT_INDICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, lightIndexBuffer);
+    }
+
+    private void writeProbes() {
+        java.nio.FloatBuffer dst = probeInput.mapped().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+        float ox = (float) (probeOriginX - uniforms.anchorX());
+        float oy = (float) (probeOriginY - uniforms.anchorY());
+        float oz = (float) (probeOriginZ - uniforms.anchorZ());
+        for (int i = 0; i < probeCount; i++) {
+            dst.put(i * 4, probePositions[i * 3] + ox);
+            dst.put(i * 4 + 1, probePositions[i * 3 + 1] + oy);
+            dst.put(i * 4 + 2, probePositions[i * 3 + 2] + oz);
+            dst.put(i * 4 + 3, 0f);
+        }
+        probeInput.flush();
     }
 
     public void renderFrame(FrameInput in) {
@@ -520,6 +632,7 @@ public final class HeliosRenderer implements AutoCloseable {
         waitForPreviousFrame();
 
         uniforms.update(in.cameraX(), in.cameraY(), in.cameraZ(), in.viewRotation(), in.projection());
+        updateLightGrid(in);
         float[] jitter = Jitter.offset(frameIndex, Jitter.phaseCount(renderW, displayW));
         int flags = (resetHistory ? FrameUniforms.FLAG_ACCUMULATE_RESET : 0)
                 | (in.cameraUnderwater() ? FrameUniforms.FLAG_CAMERA_UNDERWATER : 0);
@@ -538,6 +651,11 @@ public final class HeliosRenderer implements AutoCloseable {
         Descriptors.buffer(ctx, rtSet, BINDING_GEOMETRY_TABLE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, scene.geometryTable());
 
         rtPipeline.trace(cmd, rtSet, renderW, renderH);
+        if (probeCount > 0) {
+            writeProbes();
+            rtPipeline.traceProbes(cmd, rtSet, probeCount);
+            probesInFlight = probeCount;
+        }
         Barriers.full(cmd);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
 
@@ -645,6 +763,11 @@ public final class HeliosRenderer implements AutoCloseable {
         tonemap.close();
         rtPipeline.close();
         frameUbo.close();
+        lightBuffer.close();
+        lightCellBuffer.close();
+        lightIndexBuffer.close();
+        probeInput.close();
+        probeOutput.close();
         if (vulkanDone != null) {
             vulkanDone.close();
             glDone.close();

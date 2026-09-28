@@ -7,7 +7,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, rgba16f) uniform readonly image2D inIllumination;
-layout(binding = 1, rgba32f) uniform readonly image2D normalDepth;
+layout(binding = 1, rgba16f) uniform readonly image2D normalDepth;
 layout(binding = 2, rgba16f) uniform writeonly image2D outIllumination;
 
 layout(push_constant) uniform Push {

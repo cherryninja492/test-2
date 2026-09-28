@@ -15,7 +15,7 @@ import java.nio.ByteOrder;
  * the current anchor so motion vectors are correct when the anchor moves.
  */
 public final class FrameUniforms {
-    public static final int SIZE = 3 * 64 + 7 * 16;
+    public static final int SIZE = 3 * 64 + 8 * 16;
 
     public static final int FLAG_ACCUMULATE_RESET = 1;
     public static final int FLAG_CAMERA_UNDERWATER = 2;
@@ -30,6 +30,7 @@ public final class FrameUniforms {
     private double camX, camY, camZ;
 
     private boolean hasPrevious;
+    private int lightGridX, lightGridY, lightGridZ, lightGridEnabled;
     private final Matrix4f prevView = new Matrix4f();
     private final Matrix4f prevProj = new Matrix4f();
     private double prevCamX, prevCamY, prevCamZ;
@@ -64,6 +65,14 @@ public final class FrameUniforms {
         prevCamX = cameraX;
         prevCamY = cameraY;
         prevCamZ = cameraZ;
+    }
+
+    /** Light grid origin relative to this frame's anchor (blocks); {@code enabled} 0 disables point lights. */
+    public void setLightGrid(long originX, long originY, long originZ, boolean enabled) {
+        lightGridX = (int) (originX - anchorX);
+        lightGridY = (int) (originY - anchorY);
+        lightGridZ = (int) (originZ - anchorZ);
+        lightGridEnabled = enabled ? 1 : 0;
     }
 
     /** Forget history (teleport, dimension change): next frame has zero motion. */
@@ -129,6 +138,7 @@ public final class FrameUniforms {
         b.putInt(frameIndex).putInt(maxBounces).putInt(samplesPerPixel).putInt(flags);
         b.putFloat(prevCameraRel.x).putFloat(prevCameraRel.y).putFloat(prevCameraRel.z).putFloat(0f);
         b.putFloat(pixelAngle).putFloat(0f).putFloat(0f).putFloat(0f);
+        b.putInt(lightGridX).putInt(lightGridY).putInt(lightGridZ).putInt(lightGridEnabled);
     }
 
     /** Angular size of one render pixel (radians), for texture LOD selection. */

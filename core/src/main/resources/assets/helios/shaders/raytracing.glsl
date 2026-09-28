@@ -43,6 +43,7 @@ layout(set = 0, binding = 1, std140) uniform FrameUBO {
     uvec4 frameInfo;    // x frame index, y max bounces, z samples per pixel, w flags
     vec4 prevCameraPos; // previous camera position, relative to the current anchor
     vec4 params;        // x angular size of one render pixel (radians)
+    ivec4 lightGrid;    // xyz light grid origin relative to the anchor (blocks), w 1 if point lights are enabled
 } frame;
 
 // Vertex layout written by SectionGeometry (32 bytes, scalar).

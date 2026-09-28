@@ -7,9 +7,9 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0, rgba16f) uniform readonly image2D currentIllumination;
-layout(binding = 1, rgba32f) uniform readonly image2D normalDepth;
+layout(binding = 1, rgba16f) uniform readonly image2D normalDepth;
 layout(binding = 2, rgba16f) uniform readonly image2D motionVectors; // xy motion, z expected previous distance
-layout(binding = 3, rgba32f) uniform readonly image2D prevNormalDepth;
+layout(binding = 3, rgba16f) uniform readonly image2D prevNormalDepth;
 layout(binding = 4, rgba16f) uniform readonly image2D historyIn;
 layout(binding = 5, rgba16f) uniform writeonly image2D historyOut;
 

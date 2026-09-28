@@ -27,7 +27,7 @@ class ShaderCompilerTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "pathtrace.rgen", "primary.rmiss", "shadow.rmiss", "surface.rchit", "alphatest.rahit",
+            "pathtrace.rgen", "probe.rgen", "primary.rmiss", "shadow.rmiss", "surface.rchit", "alphatest.rahit",
             "temporal.comp", "atrous.comp", "modulate.comp", "taau.comp", "tonemap.comp"})
     void compiles(String shader) {
         ByteBuffer spirv = compiler.compile(shader);

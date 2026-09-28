@@ -62,10 +62,11 @@ class FrameUniformsTest {
     void writesStd140Layout() {
         FrameUniforms u = new FrameUniforms();
         u.update(0.5, 0.5, 0.5, new Matrix4f(), PROJ);
+        u.setLightGrid(-96, -64, 32, true);
         ByteBuffer b = ByteBuffer.allocate(FrameUniforms.SIZE).order(ByteOrder.LITTLE_ENDIAN);
         u.write(b, new float[] {0.25f, -0.125f}, 1280, 720, new Vector3f(0, 1, 0), 0.8f,
                 new Vector3f(0.2f, 0.4f, 1f), 0.5f, 42, 3, 2, FrameUniforms.FLAG_ACCUMULATE_RESET, 0.001f);
-        assertEquals(304, FrameUniforms.SIZE);
+        assertEquals(320, FrameUniforms.SIZE);
         assertEquals(0.5f, b.getFloat(192));       // cameraPos.x
         assertEquals(0.8f, b.getFloat(208 + 12));  // lightDir.w
         assertEquals(0.5f, b.getFloat(224 + 12));  // skyColor.w (rain)
@@ -76,6 +77,9 @@ class FrameUniformsTest {
         assertEquals(FrameUniforms.FLAG_ACCUMULATE_RESET, b.getInt(268));
         assertEquals(0.5f, b.getFloat(272));       // prevCameraPos.x (first frame: same as current)
         assertEquals(0.001f, b.getFloat(288));     // params.x pixel angle
+        assertEquals(-96, b.getInt(304));          // lightGrid.x relative to anchor (0)
+        assertEquals(32, b.getInt(312));
+        assertEquals(1, b.getInt(316));            // point lights enabled
     }
 
     @Test

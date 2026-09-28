@@ -27,6 +27,10 @@ public final class GpuBuffer implements AutoCloseable {
     private final long deviceAddress;
 
     private GpuBuffer(VulkanContext ctx, long size, int usage, boolean hostVisible, long alignment) {
+        this(ctx, size, usage, hostVisible, alignment, false);
+    }
+
+    private GpuBuffer(VulkanContext ctx, long size, int usage, boolean hostVisible, long alignment, boolean readback) {
         this.size = size;
         this.allocator = ctx.allocator;
         try (MemoryStack stack = stackPush()) {
@@ -36,7 +40,8 @@ public final class GpuBuffer implements AutoCloseable {
                     .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
             VmaAllocationCreateInfo allocInfo = VmaAllocationCreateInfo.calloc(stack).usage(VMA_MEMORY_USAGE_AUTO);
             if (hostVisible) {
-                allocInfo.flags(VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+                allocInfo.flags((readback ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                        : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT) | VMA_ALLOCATION_CREATE_MAPPED_BIT);
             }
             var pBuffer = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
@@ -65,6 +70,16 @@ public final class GpuBuffer implements AutoCloseable {
 
     public static GpuBuffer hostVisible(VulkanContext ctx, long size, int usage, long alignment) {
         return new GpuBuffer(ctx, size, usage, true, alignment);
+    }
+
+    /** Host-visible buffer the CPU reads back (cached memory); call {@link #invalidate()} before reading. */
+    public static GpuBuffer readback(VulkanContext ctx, long size, int usage) {
+        return new GpuBuffer(ctx, size, usage, true, 16, true);
+    }
+
+    /** Makes device writes visible to the host on non-coherent memory; no-op otherwise. */
+    public void invalidate() {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
     }
 
     public long deviceAddress() {

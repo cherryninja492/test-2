@@ -9,6 +9,7 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.renderer.chunk.RenderRegionCache;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.material.FogType;
@@ -39,7 +40,7 @@ public final class HeliosPipeline {
     private String failure;
     private int rendererGeneration = -1;
     private boolean atlasDirty = true;
-    private final SectionMesher mesher = new SectionMesher();
+    private final MeshScheduler meshScheduler = new MeshScheduler();
     private final EntityShadowCapture entityShadows = new EntityShadowCapture();
 
     // Captured at the start of LevelRenderer#renderLevel.
@@ -71,6 +72,7 @@ public final class HeliosPipeline {
 
     public void beginLevel(DeltaTracker deltaTracker, Camera camera, Matrix4f frustumMatrix, Matrix4f projectionMatrix) {
         frameActive = isEnabled() && Minecraft.getInstance().level != null;
+        EntityLighting.INSTANCE.setActive(false);
         if (!frameActive) return;
         this.camera = camera;
         this.partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
@@ -105,6 +107,7 @@ public final class HeliosPipeline {
 
     public void onChunkUnload(ClientLevel level, int chunkX, int chunkZ) {
         tracker.onChunkUnload(level, chunkX, chunkZ, (sx, sy, sz) -> {
+            meshScheduler.invalidate(sx, sy, sz);
             if (renderer != null) renderer.removeSection(sx, sy, sz);
         });
     }
@@ -137,6 +140,7 @@ public final class HeliosPipeline {
 
         if (rendererGeneration != tracker.generation()) {
             renderer.clearSections();
+            meshScheduler.invalidateAll();
             tracker.markAllDirty();
             rendererGeneration = tracker.generation();
         }
@@ -151,8 +155,12 @@ public final class HeliosPipeline {
         // Without GPU-side sync, the previous composite must be done reading before Vulkan writes again.
         composite.waitForGl();
 
+        // Scene updates below may touch buffers of the previous frame: let it finish first.
+        renderer.waitForPreviousFrame();
+
         Vec3 cam = camera.getPosition();
         meshSections(level, cam);
+        EntityLighting.INSTANCE.update(renderer, level, cam, partialTick, 64.0);
         if (config.entityShadows) entityShadows.capture(renderer, level, cam, partialTick, config.entityShadowRange);
         else renderer.setShadowGeometry(new float[0], 0, cam.x, cam.y, cam.z);
 
@@ -172,28 +180,31 @@ public final class HeliosPipeline {
         renderer.renderFrame(new FrameInput(cam.x, cam.y, cam.z, viewRotation, projection,
                 lightDir, lightIntensity, skyLinear, rain, underwater));
         composite.draw(renderer);
+        EntityLighting.INSTANCE.setActive(true);
     }
 
-    /** Meshes dirty sections, closest first, within the per-frame time budget. */
+    /**
+     * Uploads finished sections, then snapshots dirty sections (closest first, within the time
+     * budget) for meshing on worker threads.
+     */
     private void meshSections(ClientLevel level, Vec3 cam) {
+        meshScheduler.drainTo(renderer, config.uploadsPerFrame);
+        int capacity = Math.min(meshScheduler.capacity(), config.sectionsPerFrame);
+        if (capacity == 0) return;
         long deadline = System.nanoTime() + (long) (config.meshBudgetMs * 1_000_000L);
-        int camSx = SectionPos.blockToSectionCoord(cam.x);
-        int camSy = SectionPos.blockToSectionCoord(cam.y);
-        int camSz = SectionPos.blockToSectionCoord(cam.z);
-        int meshed = 0;
-        while (meshed < config.sectionsPerFrame) {
-            long[] batch = tracker.poll(Math.min(4, config.sectionsPerFrame - meshed), camSx, camSy, camSz);
-            if (batch.length == 0) break;
-            for (long section : batch) {
-                int sx = SectionPos.x(section), sy = SectionPos.y(section), sz = SectionPos.z(section);
-                if (meshed > 0 && System.nanoTime() > deadline) {
-                    tracker.markDirty(sx, sy, sz); // over budget: retry next frame
-                    continue;
-                }
-                renderer.uploadSection(sx, sy, sz, mesher.mesh(level, sx, sy, sz));
-                meshed++;
+        long[] batch = tracker.poll(capacity, SectionPos.blockToSectionCoord(cam.x),
+                SectionPos.blockToSectionCoord(cam.y), SectionPos.blockToSectionCoord(cam.z));
+        RenderRegionCache cache = new RenderRegionCache();
+        for (int i = 0; i < batch.length; i++) {
+            int sx = SectionPos.x(batch[i]), sy = SectionPos.y(batch[i]), sz = SectionPos.z(batch[i]);
+            if (i > 0 && System.nanoTime() > deadline) {
+                tracker.markDirty(sx, sy, sz); // over budget: retry next frame
+                continue;
             }
-            if (System.nanoTime() > deadline) break;
+            if (!meshScheduler.submit(level, cache, sx, sy, sz)) {
+                meshScheduler.invalidate(sx, sy, sz);
+                renderer.removeSection(sx, sy, sz); // empty section
+            }
         }
     }
 
@@ -218,8 +229,8 @@ public final class HeliosPipeline {
                 r.deviceName(), r.activeBackend(), r.renderWidth(), r.renderHeight(), r.usesGpuSync() ? "GPU" : "CPU"));
         lines.add(String.format(Locale.ROOT, "[Helios] GPU %.2f ms (trace %.2f, denoise %.2f, upscale %.2f)",
                 t.total(), t.accelerationAndTrace(), t.denoise(), t.upscaleAndTonemap()));
-        lines.add(String.format(Locale.ROOT, "[Helios] sections %d, pending %d, bounces %d",
-                r.sectionCount(), tracker.pendingCount(), config.renderer.maxBounces));
+        lines.add(String.format(Locale.ROOT, "[Helios] sections %d, pending %d, meshing %d, bounces %d",
+                r.sectionCount(), tracker.pendingCount(), meshScheduler.inFlight(), config.renderer.maxBounces));
         return lines;
     }
 

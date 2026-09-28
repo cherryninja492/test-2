@@ -19,9 +19,12 @@ public final class HeliosConfig {
 
     public boolean enabled = true;
     /** Chunk sections meshed and uploaded per frame. */
-    public int sectionsPerFrame = 64;
-    /** Milliseconds per frame spent meshing chunk sections (at least one section is always meshed). */
-    public float meshBudgetMs = 3.0f;
+    /** Max chunk sections handed to the mesher threads per frame. */
+    public int sectionsPerFrame = 128;
+    /** Milliseconds per frame the render thread spends snapshotting sections for the mesher threads. */
+    public float meshBudgetMs = 2.0f;
+    /** Max meshed sections uploaded to the GPU per frame. */
+    public int uploadsPerFrame = 192;
     /** Mobs and players cast (box-shaped) ray traced shadows. */
     public boolean entityShadows = true;
     /** Entities within this many blocks cast shadows (they are re-rendered each frame for it). */
@@ -43,6 +46,7 @@ public final class HeliosConfig {
                 RendererSettings s = config.renderer;
                 config.enabled = Boolean.parseBoolean(p.getProperty("enabled", "true"));
                 config.sectionsPerFrame = parseInt(p, "sectionsPerFrame", config.sectionsPerFrame);
+                config.uploadsPerFrame = parseInt(p, "uploadsPerFrame", config.uploadsPerFrame);
                 config.meshBudgetMs = Float.parseFloat(p.getProperty("meshBudgetMs", String.valueOf(config.meshBudgetMs)));
                 config.entityShadows = Boolean.parseBoolean(p.getProperty("entityShadows", String.valueOf(config.entityShadows)));
                 config.entityShadowRange = parseInt(p, "entityShadowRange", config.entityShadowRange);
@@ -69,6 +73,7 @@ public final class HeliosConfig {
         p.setProperty("enabled", String.valueOf(enabled));
         p.setProperty("sectionsPerFrame", String.valueOf(sectionsPerFrame));
         p.setProperty("meshBudgetMs", String.valueOf(meshBudgetMs));
+        p.setProperty("uploadsPerFrame", String.valueOf(uploadsPerFrame));
         p.setProperty("entityShadows", String.valueOf(entityShadows));
         p.setProperty("entityShadowRange", String.valueOf(entityShadowRange));
         p.setProperty("upscaler", s.upscaler.name());

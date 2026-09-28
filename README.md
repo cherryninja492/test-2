@@ -12,8 +12,9 @@ result back to OpenGL.
 
 - **Path traced global illumination**: diffuse bounces (default 2) with Russian roulette.
 - **Ray traced sun/moon shadows** with soft penumbrae, following the day/night cycle and rain.
-- **Emissive blocks** (torches, glowstone, lava…) light the world, combining ray traced emission
-  with Minecraft's block light levels.
+- **Ray traced point lights**: torches, lanterns, glowstone, lava and other light sources cast
+  coloured light and shadows.
+- **Entities react to lighting**: mobs and players darken in ray traced shadows and under water.
 - **Water** you can see into, with depth-based absorption, Fresnel reflections and underwater fog.
 - **Entity shadows**: mobs, players (including you) and items cast ray traced shadows from their animated models.
 - **Glass and ice refraction**, **glossy metal blocks** and **polished gem/stone blocks** with
@@ -52,8 +53,9 @@ result back to OpenGL.
 | `samplesPerPixel` | `1` | paths per pixel per frame |
 | `denoiser` / `denoiserIterations` | `true` / `4` | |
 | `exposure` | `1.0` | |
-| `sectionsPerFrame` | `64` | max chunk sections meshed per frame |
-| `meshBudgetMs` | `3.0` | time per frame spent meshing chunk sections |
+| `sectionsPerFrame` | `128` | max chunk sections handed to the mesher threads per frame |
+| `meshBudgetMs` | `2.0` | render-thread time per frame spent snapshotting sections for meshing |
+| `uploadsPerFrame` | `192` | max meshed sections uploaded to the GPU per frame |
 | `entityShadows` | `true` | entities (mobs, players, items) cast ray traced shadows from their models |
 | `entityShadowRange` | `40` | blocks; entities are re-rendered each frame for their shadows |
 | `validation` | `false` | Vulkan validation layers (or `-Dhelios.validation=true`) |
@@ -114,5 +116,5 @@ Known limitations / next steps:
 - Entities are rasterized by vanilla; they cast ray traced shadows but are not lit by the ray
   tracer and do not appear in reflections.
 - Water has no refraction or caustics; the sky seen in reflections is an approximation of vanilla's.
-- Emissive blocks are sampled only by bounce rays; many small lights are noisy (ReSTIR would fix this).
+- Point lights use one shadow ray per pixel; scenes with many lights in one spot can be noisy.
 - No PBR/LabPBR resource-pack support yet (normal/specular maps).

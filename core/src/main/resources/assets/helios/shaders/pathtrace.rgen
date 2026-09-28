@@ -10,26 +10,29 @@
 // The G-buffer albedo carries the transmittance so modulation darkens what is seen through
 // water/glass.
 
-layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+#include "raygen_common.glsl"
+
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outIndirect;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outAlbedo;
-layout(set = 0, binding = 6, rgba32f) uniform writeonly image2D outNormalDepth;
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D outNormalDepth;
 layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D outMotion;   // xy motion (uv), z expected previous distance
 layout(set = 0, binding = 8, r32f) uniform writeonly image2D outDepth;
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D outDirect;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image2D outSpecular;
 
-layout(location = 0) rayPayloadEXT SurfacePayload hit;
-layout(location = 1) rayPayloadEXT uint shadowMissed;
+// Point lights (LightGrid): per light two vec4 (position relative to the grid origin + intensity,
+// colour); per grid cell (offset, count) into the index list.
+layout(set = 0, binding = 11, scalar) readonly buffer Lights { vec4 lights[]; };
+layout(set = 0, binding = 12, scalar) readonly buffer LightCells { uvec2 lightCells[]; };
+layout(set = 0, binding = 13, scalar) readonly buffer LightIndices { uint lightIndices[]; };
 
 const float FIREFLY_CLAMP = 16.0;
 const int MAX_INTERFACES = 8;
-
-bool traceSurface(vec3 origin, vec3 dir) {
-    hit.t = -1.0;
-    traceRayEXT(tlas, gl_RayFlagsNoneEXT, MASK_WORLD, 0, 0, 0, origin, 0.0, dir, MAX_DISTANCE, 0);
-    return hit.t >= 0.0;
-}
+const ivec3 LIGHT_GRID_CELLS = ivec3(12, 8, 12);
+const int LIGHT_CANDIDATES = 8;
+const float POINT_LIGHT_POWER = 5.0;
+const float POINT_LIGHT_RANGE = 16.0;
+const float WATER_SURFACE_OPACITY = 0.28; // share of the (animated) water texture seen on the surface
 
 bool isClearGlass() {
     return surfaceOf(hit.material) == SURFACE_GLASS && hit.alpha < 0.95;
@@ -51,25 +54,62 @@ bool traceOpaque(vec3 origin, vec3 dir) {
     return false;
 }
 
-bool unoccluded(vec3 origin, vec3 dir) {
-    shadowMissed = 0u;
-    traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                MASK_ALL, 0, 0, 1, origin, 0.0, dir, MAX_DISTANCE, 1);
-    return shadowMissed != 0u;
+
+
+
+float pointLightFalloff(float d) {
+    return POINT_LIGHT_POWER / (1.0 + 0.3 * d * d) * smoothstep(POINT_LIGHT_RANGE, POINT_LIGHT_RANGE - 5.0, d);
 }
 
-float lightIntensity() {
-    return frame.lightDir.w * (1.0 - 0.7 * frame.skyColor.w);
+// Returns -1 if the point is outside the light grid (use Minecraft's block light instead).
+int lightCellOf(vec3 pos) {
+    if (frame.lightGrid.w == 0) return -1;
+    ivec3 cell = ivec3(floor((pos - vec3(frame.lightGrid.xyz)) / 16.0));
+    if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, LIGHT_GRID_CELLS))) return -1;
+    return (cell.y * LIGHT_GRID_CELLS.z + cell.z) * LIGHT_GRID_CELLS.x + cell.x;
 }
 
-// Light from the sun/moon arriving at a diffuse surface, without its albedo.
-vec3 directLight(vec3 pos, vec3 n, inout uint rng) {
-    float intensity = lightIntensity();
-    if (intensity <= 0.0) return vec3(0.0);
-    vec3 l = sampleCone(frame.lightDir.xyz, SUN_ANGULAR_RADIUS, rand2(rng));
-    float ndl = dot(n, l);
-    if (ndl <= 0.0 || !unoccluded(pos + n * RAY_EPSILON, l)) return vec3(0.0);
-    return SUN_COLOR * (intensity * SUN_STRENGTH * ndl);
+// Ray traced light from nearby light-emitting blocks (torches, lanterns, glowstone, lava...):
+// resampled importance sampling over the cell's lights, then one shadow ray to the chosen light.
+vec3 pointLights(int cellIndex, vec3 pos, vec3 n, uint material, inout uint rng) {
+    uvec2 cell = lightCells[cellIndex];
+    if (cell.y == 0u) return vec3(0.0);
+    vec3 gridPos = pos - vec3(frame.lightGrid.xyz);
+    bool foliage = (material & MAT_FOLIAGE) != 0u;
+    uint candidates = min(cell.y, uint(LIGHT_CANDIDATES));
+    float weightSum = 0.0;
+    float chosenWeight = 0.0;
+    vec3 chosenContribution = vec3(0.0);
+    vec3 chosenPos = vec3(0.0);
+    for (uint k = 0u; k < candidates; k++) {
+        uint slot = cell.y <= uint(LIGHT_CANDIDATES) ? k : min(uint(rand(rng) * float(cell.y)), cell.y - 1u);
+        uint light = lightIndices[cell.x + slot];
+        vec4 lp = lights[light * 2u];
+        vec3 color = lights[light * 2u + 1u].rgb;
+        vec3 toLight = lp.xyz - gridPos;
+        float d = length(toLight);
+        float ndl = dot(n, toLight / max(d, 1.0e-4));
+        if (foliage) ndl = 0.45 + 0.55 * abs(ndl);
+        if (ndl <= 0.0 || d > POINT_LIGHT_RANGE) continue;
+        vec3 contribution = color * (lp.w * pointLightFalloff(d) * ndl);
+        float w = luminance(contribution);
+        weightSum += w;
+        if (w > 0.0 && rand(rng) * weightSum <= w) {
+            chosenWeight = w;
+            chosenContribution = contribution;
+            chosenPos = lp.xyz;
+        }
+    }
+    if (chosenWeight <= 0.0) return vec3(0.0);
+    // Shadow ray towards a jittered point near the light's centre, stopping before its own block.
+    vec3 target = chosenPos + (vec3(rand(rng), rand(rng), rand(rng)) - 0.5) * 0.3;
+    vec3 toLight = target - gridPos;
+    float d = length(toLight);
+    vec3 dir = toLight / d;
+    vec3 offsetN = dot(n, dir) < 0.0 ? -n : n;
+    if (!unoccludedMasked(pos + offsetN * RAY_EPSILON, dir, max(d - 0.55, 0.0), MASK_WORLD)) return vec3(0.0);
+    float estimate = cell.y <= uint(LIGHT_CANDIDATES) ? weightSum : weightSum * float(cell.y) / float(candidates);
+    return chosenContribution / chosenWeight * estimate;
 }
 
 vec3 ambientSky(vec3 dir) {
@@ -92,7 +132,7 @@ vec3 traceIndirect(vec3 pos, vec3 n, inout uint rng) {
         n = hit.normal;
         throughput *= hit.albedo;
         if ((hit.material & MAT_WATER) != 0u) break; // treat water as a dark diffuse surface for GI
-        radiance += throughput * (emissionOf(hit.material) + blockLightOf(hit.material) + directLight(pos, n, rng));
+        radiance += throughput * (emissionOf(hit.material) + blockLightOf(hit.material) + directLight(pos, n, hit.material, rng));
         if (b >= 1u) {
             float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
             if (rand(rng) > survive) break;
@@ -109,7 +149,7 @@ vec3 traceReflection(vec3 origin, vec3 dir, inout uint rng) {
     vec3 albedo = hit.albedo;
     vec3 n = hit.normal;
     uint material = hit.material;
-    return albedo * (emissionOf(material) + blockLightOf(material) + directLight(pos, n, rng) + ambientSky(n));
+    return albedo * (emissionOf(material) + blockLightOf(material) + directLight(pos, n, material, rng) + ambientSky(n));
 }
 
 // Mirror direction perturbed within a cone (cheap glossy lobe), kept above the surface.
@@ -192,9 +232,14 @@ void main() {
 
         if (water) {
             if (!inWater) {
+                vec3 surfaceAlbedo = hit.albedo;
+                uint surfaceMaterial = hit.material;
                 float f = fresnelSchlick(cosI, 0.02);
                 specular += transmittance * f * traceReflection(p + n * RAY_EPSILON, reflect(dir, n), rng);
-                transmittance *= 1.0 - f;
+                // A share of the animated water texture, lit like a surface (vanilla-like look).
+                vec3 surfaceLight = directLight(p, n, surfaceMaterial, rng) + ambientSky(n) + blockLightOf(surfaceMaterial);
+                specular += transmittance * (1.0 - f) * WATER_SURFACE_OPACITY * surfaceAlbedo * surfaceLight;
+                transmittance *= (1.0 - f) * (1.0 - WATER_SURFACE_OPACITY);
             }
             inWater = !inWater;
             throughWater = true;
@@ -266,11 +311,15 @@ void main() {
     uint spp = max(frame.frameInfo.z, 1u);
     vec3 indirect = vec3(0.0);
     vec3 direct = vec3(0.0);
+    int lightCell = lightCellOf(pos);
     for (uint s = 0u; s < spp; s++) {
-        direct += directLight(pos, n, rng);
+        direct += directLight(pos, n, material, rng);
+        // Ray traced point lights are noisy with one sample: denoise them with the indirect light.
+        if (lightCell >= 0) indirect += pointLights(lightCell, pos, n, material, rng);
         indirect += traceIndirect(pos, n, rng);
     }
-    direct = direct / float(spp) + emissionOf(material) + blockLightOf(material); // emission = albedo * k -> k
+    direct = direct / float(spp) + emissionOf(material); // emission = albedo * k -> k
+    if (lightCell < 0) direct += blockLightOf(material);
     indirect = min(indirect / float(spp), vec3(FIREFLY_CLAMP));
     // Light reaching a submerged surface crossed the water too (approximated by the view path).
     if (throughWater) transmittance *= transmittance;

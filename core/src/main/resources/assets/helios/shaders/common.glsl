@@ -6,6 +6,7 @@ const float PI = 3.14159265359;
 const uint MAT_EMISSION_MASK = 0xFu;
 const uint MAT_CUTOUT = 1u << 4;
 const uint MAT_WATER = 1u << 5;
+const uint MAT_FOLIAGE = 1u << 6;      // thin plants: lit from both sides
 const uint MAT_BLOCK_LIGHT_SHIFT = 8u; // bits 8-11: Minecraft block light level at the surface
 const uint MAT_SURFACE_SHIFT = 12u;    // bits 12-15: surface type
 const uint SURFACE_DIFFUSE = 0u;
@@ -17,8 +18,8 @@ uint surfaceOf(uint material) {
     return (material >> MAT_SURFACE_SHIFT) & 0xFu;
 }
 
-// Normal/depth images store this distance for sky pixels.
-const float SKY_DEPTH = 1.0e6;
+// Normal/depth images (half float) store this distance for sky pixels.
+const float SKY_DEPTH = 60000.0;
 
 float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));

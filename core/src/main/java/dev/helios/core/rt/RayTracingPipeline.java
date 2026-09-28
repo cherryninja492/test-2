@@ -33,6 +33,11 @@ public final class RayTracingPipeline implements AutoCloseable {
     public static final int BINDING_OUT_DEPTH = 8;
     public static final int BINDING_OUT_DIRECT = 9;
     public static final int BINDING_OUT_SPECULAR = 10;
+    public static final int BINDING_LIGHTS = 11;
+    public static final int BINDING_LIGHT_CELLS = 12;
+    public static final int BINDING_LIGHT_INDICES = 13;
+    public static final int BINDING_PROBES_IN = 14;
+    public static final int BINDING_PROBES_OUT = 15;
 
     private static final int STAGES = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
             | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
@@ -43,7 +48,8 @@ public final class RayTracingPipeline implements AutoCloseable {
     private final long pipeline;
     private final GpuBuffer sbt;
     private final long raygenStride, missStride, hitStride;
-    private final long missOffset, hitOffset;
+    private final long missOffset, hitOffset, probeOffset;
+    private static final int GROUPS = 5;
 
     public RayTracingPipeline(VulkanContext ctx, ShaderCompiler compiler) {
         this.ctx = ctx;
@@ -58,11 +64,16 @@ public final class RayTracingPipeline implements AutoCloseable {
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 
-        String[] names = {"pathtrace.rgen", "primary.rmiss", "shadow.rmiss", "surface.rchit", "alphatest.rahit"};
+        String[] names = {"pathtrace.rgen", "primary.rmiss", "shadow.rmiss", "surface.rchit", "alphatest.rahit", "probe.rgen"};
         int[] stages = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR,
-                VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR};
+                VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR, VK_SHADER_STAGE_RAYGEN_BIT_KHR};
         long[] modules = new long[names.length];
         try (MemoryStack stack = stackPush()) {
             for (int i = 0; i < names.length; i++) modules[i] = Shaders.module(ctx, compiler, names[i]);
@@ -77,7 +88,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                 stageInfos.get(i).sType$Default().stage(stages[i]).module(modules[i]).pName(stack.UTF8("main"));
             }
 
-            VkRayTracingShaderGroupCreateInfoKHR.Buffer groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(4, stack);
+            VkRayTracingShaderGroupCreateInfoKHR.Buffer groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(GROUPS, stack);
             general(groups.get(0), 0);
             general(groups.get(1), 1);
             general(groups.get(2), 2);
@@ -87,6 +98,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                     .closestHitShader(3)
                     .anyHitShader(4)
                     .intersectionShader(VK_SHADER_UNUSED_KHR);
+            general(groups.get(4), 5);
 
             VkRayTracingPipelineCreateInfoKHR.Buffer info = VkRayTracingPipelineCreateInfoKHR.calloc(1, stack).sType$Default()
                     .pStages(stageInfos)
@@ -100,20 +112,21 @@ public final class RayTracingPipeline implements AutoCloseable {
             for (long m : modules) if (m != 0) vkDestroyShaderModule(ctx.device, m, null);
         }
 
-        // Shader binding table: [raygen][miss, shadow miss][hit], each region base-aligned.
+        // Shader binding table: [raygen][probe raygen][miss, shadow miss][hit], each region base-aligned.
         VulkanContext.RayTracingProperties rt = ctx.rtProperties;
         int handleSize = rt.shaderGroupHandleSize();
         long handleStride = align(handleSize, rt.shaderGroupHandleAlignment());
         raygenStride = align(handleStride, rt.shaderGroupBaseAlignment());
         missStride = handleStride;
         hitStride = handleStride;
-        missOffset = raygenStride;
+        probeOffset = raygenStride;
+        missOffset = 2 * raygenStride;
         hitOffset = missOffset + align(2 * missStride, rt.shaderGroupBaseAlignment());
         long sbtSize = hitOffset + align(hitStride, rt.shaderGroupBaseAlignment());
 
-        ByteBuffer handles = MemoryUtil.memAlloc(4 * handleSize);
+        ByteBuffer handles = MemoryUtil.memAlloc(GROUPS * handleSize);
         try {
-            check(vkGetRayTracingShaderGroupHandlesKHR(ctx.device, pipeline, 0, 4, handles),
+            check(vkGetRayTracingShaderGroupHandlesKHR(ctx.device, pipeline, 0, GROUPS, handles),
                     "vkGetRayTracingShaderGroupHandlesKHR");
             sbt = GpuBuffer.hostVisible(ctx, sbtSize, VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR,
                     rt.shaderGroupBaseAlignment());
@@ -122,6 +135,7 @@ public final class RayTracingPipeline implements AutoCloseable {
             copyHandle(handles, 1, dst, missOffset, handleSize);
             copyHandle(handles, 2, dst, missOffset + missStride, handleSize);
             copyHandle(handles, 3, dst, hitOffset, handleSize);
+            copyHandle(handles, 4, dst, probeOffset, handleSize);
             sbt.flush();
         } finally {
             MemoryUtil.memFree(handles);
@@ -145,11 +159,21 @@ public final class RayTracingPipeline implements AutoCloseable {
         return (v + a - 1) / a * a;
     }
 
+    /** Main path tracing pass, one ray generation invocation per render pixel. */
     public void trace(VkCommandBuffer cmd, long descriptorSet, int width, int height) {
+        trace(cmd, descriptorSet, 0, width, height);
+    }
+
+    /** Entity lighting probes, one invocation per probe. */
+    public void traceProbes(VkCommandBuffer cmd, long descriptorSet, int count) {
+        trace(cmd, descriptorSet, probeOffset, count, 1);
+    }
+
+    private void trace(VkCommandBuffer cmd, long descriptorSet, long raygenOffset, int width, int height) {
         try (MemoryStack stack = stackPush()) {
             long base = sbt.deviceAddress();
             VkStridedDeviceAddressRegionKHR raygen = VkStridedDeviceAddressRegionKHR.calloc(stack)
-                    .deviceAddress(base).stride(raygenStride).size(raygenStride);
+                    .deviceAddress(base + raygenOffset).stride(raygenStride).size(raygenStride);
             VkStridedDeviceAddressRegionKHR miss = VkStridedDeviceAddressRegionKHR.calloc(stack)
                     .deviceAddress(base + missOffset).stride(missStride).size(2 * missStride);
             VkStridedDeviceAddressRegionKHR hit = VkStridedDeviceAddressRegionKHR.calloc(stack)

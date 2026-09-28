@@ -2,6 +2,23 @@
 
 Jars built by CI are named `helios-<version>+<commit>.jar`.
 
+## 0.5.0
+New
+- Ray traced point lights: every light-emitting block (torches, lanterns, glowstone, lava, soul
+  fire, redstone...) is a coloured light that casts shadows. Lights are organised in a camera-centred
+  grid; each pixel resamples nearby lights and traces one shadow ray.
+- Entities react to ray traced lighting: nearby entities are probed for sun visibility and water
+  depth each frame, and their vanilla light level is scaled accordingly (darker in shadows and
+  under water).
+- Grass, flowers, crops and vines are lit from both sides (no more black plants).
+- Water surfaces show a share of Minecraft's animated water texture, like vanilla.
+
+Performance
+- Chunk sections are meshed on worker threads from vanilla-style region snapshots, nearest first.
+  At high render distances the backlog of unbuilt sections (which also showed up as holes, e.g.
+  when looking through glass) now clears quickly instead of taking minutes.
+- Normal/depth buffers use half floats (less denoiser bandwidth).
+
 ## 0.4.0
 New
 - Glass and ice refract (IOR 1.5 / 1.31) with Fresnel reflections and tint from stained glass;
