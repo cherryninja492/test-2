@@ -188,11 +188,17 @@ public final class VulkanContext implements AutoCloseable {
     static Set<String> deviceExtensions(MemoryStack stack, VkPhysicalDevice pd) {
         IntBuffer count = stack.mallocInt(1);
         vkEnumerateDeviceExtensionProperties(pd, (ByteBuffer) null, count, null);
-        VkExtensionProperties.Buffer props = VkExtensionProperties.malloc(count.get(0), stack);
-        vkEnumerateDeviceExtensionProperties(pd, (ByteBuffer) null, count, props);
-        Set<String> names = new HashSet<>();
-        for (VkExtensionProperties p : props) names.add(p.extensionNameString());
-        return names;
+        // Heap, not the MemoryStack: drivers report ~250 extensions x 260 bytes, which alone
+        // overflows LWJGL's default 64 KiB thread stack.
+        VkExtensionProperties.Buffer props = VkExtensionProperties.malloc(count.get(0));
+        try {
+            vkEnumerateDeviceExtensionProperties(pd, (ByteBuffer) null, count, props);
+            Set<String> names = new HashSet<>();
+            for (VkExtensionProperties p : props) names.add(p.extensionNameString());
+            return names;
+        } finally {
+            props.free();
+        }
     }
 
     private static int findQueueFamily(MemoryStack stack, VkPhysicalDevice pd) {
