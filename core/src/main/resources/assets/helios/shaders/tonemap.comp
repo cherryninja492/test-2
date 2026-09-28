@@ -1,0 +1,27 @@
+#version 460
+
+// HDR -> display. Output is gamma encoded like Minecraft's own framebuffer contents.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D hdr;
+layout(binding = 1, rgba8) uniform writeonly image2D ldr;
+
+layout(push_constant) uniform Push {
+    ivec2 size;
+    float exposure;
+    int pad;
+} pc;
+
+// Narkowicz 2015, ACES filmic curve fit
+vec3 aces(vec3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.size))) return;
+    vec3 color = aces(imageLoad(hdr, p).rgb * pc.exposure);
+    imageStore(ldr, p, vec4(pow(color, vec3(1.0 / 2.2)), 1.0));
+}

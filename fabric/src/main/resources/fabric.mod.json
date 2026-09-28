@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "helios",
+  "version": "${version}",
+  "name": "Helios",
+  "description": "Hardware ray traced lighting for Minecraft: path traced global illumination, sun shadows, emissive blocks and water reflections, with DLSS or built-in temporal upscaling.",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.helios.fabric.HeliosClient"]
+  },
+  "mixins": ["helios.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.1",
+    "java": ">=21"
+  },
+  "conflicts": {
+    "sodium": "*",
+    "iris": "*"
+  }
+}

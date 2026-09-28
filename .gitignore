@@ -1,0 +1,8 @@
+.gradle/
+build/
+out/
+run/
+*.iml
+.idea/
+native/dlss/build/
+native/dlss/sdk/

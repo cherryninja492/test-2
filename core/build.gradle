@@ -1,0 +1,30 @@
+plugins {
+    id 'java-library'
+}
+
+def lwjglNatives = ['natives-linux', 'natives-windows']
+
+dependencies {
+    // Provided by Minecraft at runtime.
+    compileOnly "org.lwjgl:lwjgl:${lwjgl_version}"
+    compileOnly "org.joml:joml:${joml_version}"
+
+    // Not shipped with Minecraft; the Fabric module jar-in-jars these.
+    api "org.lwjgl:lwjgl-vulkan:${lwjgl_version}"
+    api "org.lwjgl:lwjgl-vma:${lwjgl_version}"
+    api "org.lwjgl:lwjgl-shaderc:${lwjgl_version}"
+
+    testImplementation "org.lwjgl:lwjgl:${lwjgl_version}"
+    testImplementation "org.joml:joml:${joml_version}"
+    testRuntimeOnly "org.lwjgl:lwjgl:${lwjgl_version}:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-shaderc:${lwjgl_version}:natives-linux"
+    testImplementation platform('org.junit:junit-bom:5.10.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+ext.lwjglNatives = lwjglNatives
+
+test {
+    useJUnitPlatform()
+}

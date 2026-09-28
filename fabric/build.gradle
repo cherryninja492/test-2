@@ -1,0 +1,47 @@
+plugins {
+    id 'fabric-loom' version "${loom_version}"
+}
+
+base {
+    archivesName = 'helios'
+}
+
+def lwjglNatives = ['natives-linux', 'natives-windows']
+def bundledLwjgl = ['lwjgl-vulkan', 'lwjgl-vma', 'lwjgl-shaderc']
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+
+    implementation project(':core')
+    include project(':core')
+
+    // Minecraft ships LWJGL core/GL/GLFW but not these; nest them (and their natives) in the mod jar.
+    bundledLwjgl.each { lib ->
+        include "org.lwjgl:${lib}:${lwjgl_version}"
+    }
+    ['lwjgl-vma', 'lwjgl-shaderc'].each { lib ->
+        lwjglNatives.each { natives ->
+            include "org.lwjgl:${lib}:${lwjgl_version}:${natives}"
+            runtimeOnly "org.lwjgl:${lib}:${lwjgl_version}:${natives}"
+        }
+    }
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand 'version': project.version
+    }
+}
+
+loom {
+    runs {
+        client {
+            // Uncomment to enable Vulkan validation layers in the dev client.
+            // vmArg '-Dhelios.validation=true'
+        }
+    }
+}

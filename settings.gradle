@@ -1,0 +1,17 @@
+pluginManagement {
+    repositories {
+        maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'helios'
+
+include 'core'
+
+// The Fabric module needs Loom + Minecraft from maven.fabricmc.net / Mojang.
+// Pass -Phelios.coreOnly to build and test only the renderer core (e.g. in CI without those repos).
+if (!providers.gradleProperty('helios.coreOnly').isPresent()) {
+    include 'fabric'
+}
