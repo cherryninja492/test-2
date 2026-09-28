@@ -102,8 +102,11 @@ public final class HeliosRenderer implements AutoCloseable {
         if (settings.upscaler == UpscalerBackend.DLSS && !DlssBridge.load(nativeSearchDirs)) {
             LOG.info("DLSS unavailable (" + DlssBridge.loadError() + "); using TAAU");
         }
-        ctx = new VulkanContext(glDeviceUuid, DlssUpscaler.requiredInstanceExtensions(),
-                DlssUpscaler.requiredDeviceExtensions(), settings.validation);
+        List<String> instanceExts = DlssUpscaler.requiredInstanceExtensions();
+        List<String> deviceExts = DlssUpscaler.requiredDeviceExtensions();
+        // LWJGL's VkInstance/VkDevice constructors need more than the render thread's 64 KiB stack.
+        ctx = HeliosStack.callWithLargeStack("Helios Vulkan init",
+                () -> new VulkanContext(glDeviceUuid, instanceExts, deviceExts, settings.validation));
         LOG.info("Helios ray tracing on " + ctx.deviceName);
 
         DlssUpscaler dlssCandidate = null;
